@@ -14,6 +14,7 @@
 #include "weather.h"
 #include "screen_ink.h"
 #include "_preference.h"
+#include "deepseek.h"
 
 #include "version.h"
 
@@ -36,6 +37,11 @@ WiFiManagerParameter para_cd_day_date("cd_day_date", "日期（yyyyMMdd）", "",
 WiFiManagerParameter para_tag_days("tag_days", "日期Tag（yyyyMMddx，详见README）", "", 30); //     日期Tag
 WiFiManagerParameter para_si_week_1st("si_week_1st", "每周起始（0:周日，1:周一）", "0", 2, "pattern='\\[0-1]{1}'"); //     每周第一天
 WiFiManagerParameter para_study_schedule("study_schedule", "课程表", "0", 4000, "pattern='\\[0-9]{3}[;]$'"); //     每周第一天
+WiFiManagerParameter para_deepseek_key("deepseek_key", "DeepSeek API Key", "", 64); //     DeepSeek API Key（用于显示token用量/余额）
+WiFiManagerParameter para_refresh_mode("refresh_mode", "刷新模式(0全刷/1LUT)", "0", 1); //  屏幕刷新模式
+
+#include <WebServer.h>
+WebServer configServer(80);
 
 void print_wakeup_reason() {
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -84,132 +90,210 @@ unsigned long TIME_TO_SLEEP = 180 * 1000;
 
 bool _wifi_flag = false;
 unsigned long _wifi_failed_millis;
+volatile bool _configRequested = false;  // 双击标志位
 void setup() {
     delay(10);
     Serial.begin(115200);
-    Serial.println(".");
-    print_wakeup_reason();
-    Serial.println("\r\n\r\n");
-    delay(10);
-
-
-    Serial.printf("***********************\r\n");
-    Serial.printf("      J-Calendar\r\n");
-    Serial.printf("    version: %s\r\n", J_VERSION);
-    Serial.printf("***********************\r\n\r\n");
-    Serial.printf("Copyright © 2022-2025 JADE Software Co., Ltd. All Rights Reserved.\r\n\r\n");
+    Serial.println();
+    Serial.println("=== J-Calendar Minimal Debug ===");
+    Serial.printf("Version: %s\r\n", J_VERSION);
 
     led_init();
     led_on();
-    delay(100);
-    int voltage = readBatteryVoltage();
-    Serial.printf("Battery: %d mV\r\n", voltage);
-    if(voltage < 2500) {
-        Serial.println("[INFO]电池损坏或无ADC电路。");
-    } else if(voltage < 3000) {
-        Serial.println("[WARN]电量低于3v，系统休眠。");
-        go_sleep();
-    } else if (voltage < 3300) {
-        // 低于3.3v，电池电量用尽，屏幕给警告，然后关机。 
-        Serial.println("[WARN]电量低于3.3v，警告并系统休眠。");
-        si_warning("电量不足，请充电！");
-        go_sleep();
-    } else if (voltage > 4400) {
-        Serial.println("[INFO]未接电池。");
-    }
+    delay(300);
+    led_off();
 
+    // 按键：双击设置标志位，loop 中处理
     button.setClickMs(300);
-    button.setPressMs(3000); // 设置长按的时长
-    button.attachClick(buttonClick, &button);
-    button.attachDoubleClick(buttonDoubleClick, &button);
-    // button.attachMultiClick()
-    button.attachLongPressStop(buttonLongPressStop, &button);
+    button.setPressMs(3000);
+    button.attachDoubleClick([]() {
+        Preferences p;
+        p.begin(PREF_NAMESPACE, true);
+        String savedKey = p.getString(PREF_DS_KEY, "");
+        p.end();
+        Serial.println("=== DOUBLE CLICK - will open config portal ===");
+        Serial.print("Saved DS Key: ");
+        Serial.println(savedKey.length() > 0 ? savedKey.substring(0,8) + "..." : "(empty)");
+        _configRequested = true;
+    });
     attachInterrupt(digitalPinToInterrupt(KEY_M), checkTicks, CHANGE);
+    
+    Serial.println("Ready. Double-click button to configure DeepSeek Key.");
+    Serial.println("------------------------------------------");
+}
 
-    Serial.println("Wm begin...");
-    led_fast();
+void loop() {
+    button.tick();
+    wm.process();
+    
+    // 双击触发 → 打开网页配置（ESP32 WebServer，任何时间都能访问）
+    if (_configRequested) {
+        _configRequested = false;
+        Serial.println("=== Opening Web Config ===");
+        Serial.printf("Visit http://%s/ to configure DeepSeek Key\r\n", WiFi.localIP().toString().c_str());
+        
+        // 设置 Web 路由
+        configServer.on("/", [](){
+            String html = "<html><head><meta charset='utf-8'><title>J-Calendar</title></head><body>";
+            html += "<h2>J-Calendar 配置</h2>";
+            html += "<form action='/save' method='POST'>";
+            html += "DeepSeek API Key: <input type='text' name='key' size='40' value='";
+            Preferences p;
+            p.begin(PREF_NAMESPACE, true);
+            html += p.getString(PREF_DS_KEY, "");
+            p.end();
+            html += "'><br><br>";
+            html += "<input type='submit' value='保存'>";
+            html += "</form></body></html>";
+            configServer.send(200, "text/html", html);
+        });
+        
+        configServer.on("/save", [](){
+            if (configServer.hasArg("key")) {
+                String key = configServer.arg("key");
+                Preferences p;
+                p.begin(PREF_NAMESPACE, false);
+                p.putString(PREF_DS_KEY, key);
+                p.end();
+                configServer.send(200, "text/html", 
+                    "<html><meta charset='utf-8'><body>"
+                    "<h2>✅ Key 已保存！</h2>"
+                    "<p>设备将在 3 秒后重启...</p>"
+                    "</body></html>");
+                Serial.println("[Config] Key saved via web! Restarting...");
+                delay(3000);
+                ESP.restart();
+            } else {
+                configServer.send(400, "text/html", "Missing key parameter");
+            }
+        });
+        
+        configServer.begin();
+        Serial.println("[Config] Web server started on port 80");
+        Serial.printf("[Config] Visit http://%s/\r\n", WiFi.localIP().toString().c_str());
+        
+        // 运行 Web 服务器 2 分钟
+        led_config();
+        unsigned long configStart = millis();
+        while (millis() - configStart < 120000) {
+            configServer.handleClient();
+            button.tick();
+            delay(10);
+        }
+        configServer.stop();
+        Serial.println("[Config] Web server stopped");
+        led_on();
+        return;
+    }
+    
+    // 配置门户运行中，不执行主流程
+    if (wm.getConfigPortalActive()) {
+        delay(10);
+        return;
+    }
+    
+    // 主流程：只执行一次
+    static bool mainDone = false;
+    if (mainDone) {
+        delay(10);
+        return;
+    }
+    
+    // 启动后等待 20 秒，方便用户双击进入配置
+    static unsigned long bootTime = millis();
+    if (millis() - bootTime < 20000) {
+        if (millis() - bootTime < 100) {
+            Serial.println("------------------------------------------");
+            Serial.println("[INFO] Double-click button to open Web Config.");
+            Serial.printf("[INFO] 20 seconds countdown...\r\n");
+        }
+        if ((millis() - bootTime) % 5000 < 15) {
+            Serial.printf("[%lu] Double-click for config...\r\n", 20 - (millis() - bootTime) / 1000);
+        }
+        delay(10);
+        return;
+    }
+    
+    mainDone = true;
+    
+    // 步骤1：连 WiFi
+    Serial.println("Step 1: Connecting WiFi...");
+    WiFi.mode(WIFI_STA);
     wm.setHostname("J-Calendar");
     wm.setEnableConfigPortal(false);
     wm.setConnectTimeout(10);
+    
     if (wm.autoConnect()) {
-        Serial.println("Connect OK.");
-        led_on();
-        _wifi_flag = true;
-    } else {
-        Serial.println("Connect failed.");
-        _wifi_flag = false;
-        _wifi_failed_millis = millis();
-        led_slow();
-        _sntp_exec(2);
-        weather_exec(2);
-        WiFi.mode(WIFI_OFF); // 提前关闭WIFI，省电
-        Serial.println("Wifi closed.");
-    }
-}
-
-/**
- * 处理各个任务
- * 1. sntp同步
- *      前置条件：Wifi已连接
- * 2. 刷新日历
- *      前置条件：sntp同步完成（无论成功或失败）
- * 3. 刷新天气信息
- *      前置条件：wifi已连接
- * 4. 系统配置
- *      前置条件：无
- * 5. 休眠
- *      前置条件：所有任务都完成或失败，
- */
-void loop() {
-    button.tick(); // 单击，刷新页面；双击，打开配置；长按，重启
-    wm.process();
-    // 前置任务：wifi已连接
-    // sntp同步
-    if (_sntp_status() == -1) {
+        Serial.println("WiFi OK!");
+        
+        // 步骤2：同步时间
+        Serial.println("Step 2: Sync SNTP...");
         _sntp_exec();
-    }
-    // 如果是定时器唤醒，并且接近午夜（23:50之后），则直接休眠
-    if (_sntp_status() == SYNC_STATUS_TOO_LATE) {
-        go_sleep();
-    }
-    // 前置任务：wifi已连接
-    // 获取Weather信息
-    if (weather_status() == -1) {
-        weather_exec();
-    }
-
-    // 刷新日历
-    // 前置任务：sntp、weather
-    // 执行条件：屏幕状态为待处理
-    if (_sntp_status() > 0 && weather_status() > 0 && si_screen_status() == -1) {
-        // 数据获取完毕后，关闭Wifi，省电
-        if (!wm.getConfigPortalActive()) {
-            WiFi.mode(WIFI_OFF);
+        while (_sntp_status() == 0) { delay(100); }
+        Serial.printf("SNTP status: %d\r\n", _sntp_status());
+        
+        // 步骤3：查 DeepSeek 余额（仅余额，不消耗 token）
+        Serial.println("Step 3: Query DeepSeek balance...");
+        deepseek_exec_balance_only();
+        while (deepseek_status() == 0) { delay(100); }
+        Serial.printf("DeepSeek status: %d\r\n", deepseek_status());
+        
+        if (deepseek_status() == 1) {
+            DeepSeekData* ds = deepseek_data();
+            Serial.printf("Balance: %s %s\r\n", ds->currency.c_str(), ds->totalBalance.c_str());
+            Serial.printf("Today: Flash=%u Pro=%u\r\n", ds->tokensTodayFlash, ds->tokensTodayPro);
         }
-        Serial.println("Wifi closed after data fetch.");
-
-        si_screen();
-    }
-
-    // 休眠
-    // 前置条件：屏幕刷新完成（或成功）
-
-    // 未在配置状态，且屏幕刷新完成，进入休眠
-    if (!wm.getConfigPortalActive() && si_screen_status() > 0) {
-        if (_wifi_flag) {
-            go_sleep();
+        
+        // 步骤4：显示屏幕
+        // 首次启动：全刷。后续唤醒：仅局部刷新状态栏（DeepSeek数据变化时才刷）
+        time_t now = 0;
+        time(&now);
+        struct tm t;
+        localtime_r(&now, &t);
+        char todayBuf[9];
+        snprintf(todayBuf, sizeof(todayBuf), "%04d%02d%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+        
+        Preferences pref;
+        pref.begin(PREF_NAMESPACE, true);
+        String fullDate = pref.getString(PREF_FULL_DATE, "");
+        bool todayFullDone = (fullDate == String(todayBuf));
+        pref.end();
+        
+        if (!todayFullDone) {
+            // 今日首次 = 全刷
+            Serial.println("Step 4: FULL screen refresh...");
+            si_screen();
+        } else {
+            // 今日非首次 = 局部刷新状态栏（免闪屏）
+            Serial.println("Step 4: PARTIAL status refresh (no flicker)...");
+            si_screen_partial_status();
         }
-        if (!_wifi_flag && millis() - _wifi_failed_millis > 10 * 1000) { // 如果wifi连接不成功，等待10秒休眠
-            go_sleep();
-        }
+        while (si_screen_status() == 0) { delay(100); }
+        Serial.printf("Screen status: %d\r\n", si_screen_status());
+        
+    } else {
+        Serial.println("WiFi FAILED!");
     }
-    // 配置状态下，
-    if (wm.getConfigPortalActive() && millis() - _idle_millis > TIME_TO_SLEEP) {
-        go_sleep();
-    }
-
-    delay(10);
+    
+    WiFi.mode(WIFI_OFF);
+    
+    // 计算下次唤醒时间：每小时整点
+    time_t now2 = 0;
+    time(&now2);
+    struct tm local;
+    localtime_r(&now2, &local);
+    int secsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec + 10;
+    
+    Serial.printf("Deep sleep %ds until next hour...\r\n", secsToNextHour);
+    delay(100);
+    
+    esp_sleep_enable_timer_wakeup((uint64_t)secsToNextHour * 1000000ULL);
+    esp_sleep_enable_ext0_wakeup(KEY_M, LOW);
+    esp_deep_sleep_start();
 }
+
+// ====== 以下旧代码临时禁用 ======
+#if 0
 
 
 // 刷新页面
@@ -240,6 +324,8 @@ void saveParamsCallback() {
     pref.putString(PREF_TAG_DAYS, para_tag_days.getValue());
     pref.putString(PREF_SI_WEEK_1ST, strcmp(para_si_week_1st.getValue(), "1") == 0 ? "1" : "0");
     pref.putString(PREF_STUDY_SCHEDULE, para_study_schedule.getValue());
+    pref.putString(PREF_DS_KEY, para_deepseek_key.getValue());
+    pref.putUChar(PREF_REFRESH_MODE, strcmp(para_refresh_mode.getValue(), "1") == 0 ? 1 : 0);
     pref.end();
 
     Serial.println("Params saved.");
@@ -263,6 +349,7 @@ void buttonDoubleClick(void* oneButton) {
     if (weather_status == 0) {
         weather_stop();
     }
+    deepseek_stop();
 
     // 设置配置页面
     // 根据配置信息设置默认值
@@ -277,6 +364,8 @@ void buttonDoubleClick(void* oneButton) {
     String tagDays = pref.getString(PREF_TAG_DAYS);
     String week1st = pref.getString(PREF_SI_WEEK_1ST, "0");
     String studySchedule = pref.getString(PREF_STUDY_SCHEDULE);
+    String dsKey = pref.getString(PREF_DS_KEY);
+    String refreshMode = pref.getUChar(PREF_REFRESH_MODE, 0) == 1 ? "1" : "0";
     pref.end();
 
     para_qweather_host.setValue(qHost.c_str(), 64);
@@ -288,6 +377,8 @@ void buttonDoubleClick(void* oneButton) {
     para_tag_days.setValue(tagDays.c_str(), 30);
     para_si_week_1st.setValue(week1st.c_str(), 1);
     para_study_schedule.setValue(studySchedule.c_str(), 4000);
+    para_deepseek_key.setValue(dsKey.c_str(), 64);
+    para_refresh_mode.setValue(refreshMode.c_str(), 1);
 
     wm.setTitle("J-Calendar");
     wm.addParameter(&para_si_week_1st);
@@ -299,6 +390,8 @@ void buttonDoubleClick(void* oneButton) {
     wm.addParameter(&para_cd_day_date);
     wm.addParameter(&para_tag_days);
     wm.addParameter(&para_study_schedule);
+    wm.addParameter(&para_deepseek_key);
+    wm.addParameter(&para_refresh_mode);
     // std::vector<const char *> menu = {"wifi","wifinoscan","info","param","custom","close","sep","erase","update","restart","exit"};
     std::vector<const char*> menu = { "wifi","param","update","sep","info","restart","exit" };
     wm.setMenu(menu); // custom menu, pass vector
@@ -334,30 +427,52 @@ time_t blankTime = 0;
 void go_sleep() {
     uint64_t p;
     // 根据配置情况来刷新，如果未配置qweather信息，则24小时刷新，否则每2小时刷新
+    // 如果配置了 DeepSeek Key，则始终每小时刷新（方便查看 token 用量）
     Preferences pref;
     pref.begin(PREF_NAMESPACE);
     String _qweather_key = pref.getString(PREF_QWEATHER_KEY, "");
+    String _ds_key = pref.getString(PREF_DS_KEY, "");
     pref.end();
 
     time_t now;
     time(&now);
     struct tm local;
     localtime_r(&now, &local);
+
+    bool dsConfigured = (_ds_key.length() > 0);
+
     if (_qweather_key.length() == 0 || weather_type() == 0) { // 没有配置天气或者使用按日天气，则第二天刷新。
-        // Sleep to next day
-        int secondsToNextDay = (24 - local.tm_hour) * 3600 - local.tm_min * 60 - local.tm_sec;
-        Serial.printf("Seconds to next day: %d seconds.\n", secondsToNextDay);
-        p = (uint64_t)(secondsToNextDay);
-        p = p < 0 ? 3600 * 24 : (p + 30); // 额外增加30秒，避免过早唤醒
-    } else {
-        // Sleep to next even hour.
-        int secondsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec;
-        if ((local.tm_hour % 2) == 0) { // 如果是奇数点，则多睡1小时
-            secondsToNextHour += 3600;
+        if (dsConfigured) {
+            // DeepSeek 已配置：每小时唤醒一次更新 token 用量
+            int secondsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec;
+            Serial.printf("Seconds to next hour (DS mode): %d seconds.\n", secondsToNextHour);
+            p = (uint64_t)(secondsToNextHour);
+            p = p < 0 ? 3600 : (p + 10);
+        } else {
+            // Sleep to next day
+            int secondsToNextDay = (24 - local.tm_hour) * 3600 - local.tm_min * 60 - local.tm_sec;
+            Serial.printf("Seconds to next day: %d seconds.\n", secondsToNextDay);
+            p = (uint64_t)(secondsToNextDay);
+            p = p < 0 ? 3600 * 24 : (p + 30); // 额外增加30秒，避免过早唤醒
         }
-        Serial.printf("Seconds to next even hour: %d seconds.\n", secondsToNextHour);
-        p = (uint64_t)(secondsToNextHour);
-        p = p < 0 ? 3600 : (p + 10); // 额外增加10秒，避免过早唤醒
+    } else {
+        // 实时天气：每偶数小时刷新
+        if (dsConfigured) {
+            // DeepSeek 已配置：每小时唤醒
+            int secondsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec;
+            Serial.printf("Seconds to next hour (DS+weather mode): %d seconds.\n", secondsToNextHour);
+            p = (uint64_t)(secondsToNextHour);
+            p = p < 0 ? 3600 : (p + 10);
+        } else {
+            // Sleep to next even hour.
+            int secondsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec;
+            if ((local.tm_hour % 2) == 0) { // 如果是奇数点，则多睡1小时
+                secondsToNextHour += 3600;
+            }
+            Serial.printf("Seconds to next even hour: %d seconds.\n", secondsToNextHour);
+            p = (uint64_t)(secondsToNextHour);
+            p = p < 0 ? 3600 : (p + 10); // 额外增加10秒，避免过早唤醒
+        }
     }
 
     esp_sleep_enable_timer_wakeup(p * (uint64_t)uS_TO_S_FACTOR);
@@ -390,3 +505,5 @@ void go_sleep() {
     Serial.flush();
     esp_deep_sleep_start();
 }
+
+#endif // #if 0

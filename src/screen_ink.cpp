@@ -3,11 +3,15 @@
 
 #include <weather.h>
 #include <API.hpp>
+#include <deepseek.h>
 #include "holiday.h"
 #include "nongli.h"
 
 #include "battery.h"
 int voltage;
+
+// 刷新模式：0=全刷（闪屏），1=LUT差分（无闪屏）
+uint8_t _refresh_mode = 0;
 
 #include <_preference.h>
 
@@ -833,6 +837,33 @@ void draw_status(bool partial) {
     u8g2Fonts.setFontDirection(0);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+
+    // DeepSeek 今日token用量 + 账户余额（电池图标左侧）
+    Serial.printf("[draw_status] deepseek_status=%d\r\n", deepseek_status());
+    if (deepseek_status() == 1) {
+        DeepSeekData* ds = deepseek_data();
+        String text = String(ds->tokensTodayFlash + ds->tokensTodayPro) + "t ";
+        if (ds->totalBalance.length() > 0) {
+            String curSym = (ds->currency == "USD") ? "$" : "¥";
+            text += curSym + ds->totalBalance;
+        }
+        Serial.printf("[draw_status] text=%s\r\n", text.c_str());
+        
+        // 红色背景框确认位置
+        u8g2Fonts.setFont(FONT_SUB);
+        int16_t textW = u8g2Fonts.getUTF8Width(text.c_str());
+        int16_t x = 400 - 12 - 4 - textW;
+        int16_t y = 10;
+        display.fillRect(x - 2, 0, textW + 4, 16, GxEPD_RED);
+        
+        Serial.printf("[draw_status] draw at x=%d y=%d w=%d\r\n", x, y, textW);
+        u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+        u8g2Fonts.drawUTF8(x, y, text.c_str());
+    } else {
+        // 未查询到 token 也显示提示
+        Serial.printf("[draw_status] no data, status=%d\r\n", deepseek_status());
+    }
+
     u8g2Fonts.setFont(u8g2_font_siji_t_6x10);
 
     // 电池icon
@@ -1047,34 +1078,74 @@ void task_screen(void* param) {
 
     voltage = readBatteryVoltage();
 
+    // 读取刷新模式偏好
+    Preferences prefRM;
+    prefRM.begin(PREF_NAMESPACE, true);
+    _refresh_mode = prefRM.getUChar(PREF_REFRESH_MODE, 0);
+    prefRM.end();
+    Serial.printf("[Task] refresh mode: %s\n", _refresh_mode == 1 ? "LUT" : "FULL");
+
     delay(100);
 
-    display.init(115200);          // 串口使能 初始化完全刷新使能 复位时间 ret上拉使能
-    display.setRotation(ROTATION); // 设置屏幕旋转1和3是横向  0和2是纵向
+    display.init(115200);
+    display.setRotation(ROTATION);
     u8g2Fonts.begin(display);
 
-    init_cal_layout_size();
     display.setFullWindow();
     display.firstPage();
     display.fillScreen(GxEPD_WHITE);
     do {
-        if (_si_type == 1) {
-            drawStudySchedule();
+        // ★★★ 最小测试：只显示 DeepSeek 数据 ★★★
+        u8g2Fonts.setFontMode(1);
+        u8g2Fonts.setFontDirection(0);
+        u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+
+        if (deepseek_status() == 1) {
+            DeepSeekData* ds = deepseek_data();
+            uint32_t totalToday = ds->tokensTodayFlash + ds->tokensTodayPro;
+            
+            // 标题
+            u8g2Fonts.setFont(FONT_TEXT);
+            u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+            u8g2Fonts.drawUTF8(10, 30, "DeepSeek 用量");
+            
+            // Flash token
+            u8g2Fonts.setFont(FONT_SUB);
+            u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Flash: %ut", ds->tokensTodayFlash);
+            u8g2Fonts.drawUTF8(10, 60, buf);
+            
+            // Pro token
+            snprintf(buf, sizeof(buf), "Pro:   %ut", ds->tokensTodayPro);
+            u8g2Fonts.drawUTF8(10, 80, buf);
+            
+            // 今日合计（大红字）
+            u8g2Fonts.setFont(u8g2_font_fub25_tn);
+            u8g2Fonts.setForegroundColor(GxEPD_RED);
+            snprintf(buf, sizeof(buf), "%ut", totalToday);
+            u8g2Fonts.drawUTF8(10, 130, buf);
+            
+            // 余额
+            u8g2Fonts.setFont(FONT_TEXT);
+            u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+            String balStr = "余额: " + ds->currency + " " + ds->totalBalance;
+            u8g2Fonts.drawUTF8(10, 170, balStr.c_str());
+            
+            // 时间戳
+            u8g2Fonts.setFont(FONT_SUB);
+            char timeBuf[32];
+            snprintf(timeBuf, sizeof(timeBuf), "更新: %d-%02d-%02d %02d:%02d",
+                tmInfo.tm_year + 1900, tmInfo.tm_mon + 1, tmInfo.tm_mday,
+                tmInfo.tm_hour, tmInfo.tm_min);
+            u8g2Fonts.drawUTF8(10, 280, timeBuf);
+            
+            Serial.println("[SCREEN] Token display rendered!");
         } else {
-            draw_cal_days(false);
-            draw_cal_header();
-        }
-
-        draw_cal_year(false);
-
-        // 倒计日
-        draw_cd_day(_cd_day_label, _cd_day_date);
-
-        if (weather_status() == 1) {
-            draw_weather(false);
-        }
-        if (voltage > 1000 && voltage < 4300) {
-            draw_status(false);
+            u8g2Fonts.setFont(FONT_TEXT);
+            u8g2Fonts.setForegroundColor(GxEPD_RED);
+            u8g2Fonts.drawUTF8(10, 100, "DeepSeek 未配置");
+            Serial.printf("[SCREEN] No data, status=%d\r\n", deepseek_status());
         }
     } while (display.nextPage());
 
@@ -1083,6 +1154,11 @@ void task_screen(void* param) {
     Preferences pref;
     pref.begin(PREF_NAMESPACE);
     pref.putInt(PREF_SI_CAL_DATE, _calendar_date);
+    // 记录今日已完成全屏刷新，重置局部刷新计数
+    char todayBuf[9];
+    snprintf(todayBuf, sizeof(todayBuf), "%04d%02d%02d", tmInfo.tm_year + 1900, tmInfo.tm_mon + 1, tmInfo.tm_mday);
+    pref.putString(PREF_FULL_DATE, String(todayBuf));
+    pref.putUChar(PREF_PARTIAL_CNT, 0);
     pref.end();
 
     display.powerOff();
@@ -1112,6 +1188,43 @@ void si_screen() {
 
 int si_screen_status() {
     return _screen_status;
+}
+
+/**
+ * 仅局部刷新状态栏（DeepSeek token + 电池），避免全屏闪屏
+ * 使用 LUT 差分刷新，不改变日历/天气区域
+ */
+void si_screen_partial_status() {
+    _screen_status = 0;
+    Serial.println("[Task] screen partial status update begin...");
+
+    voltage = readBatteryVoltage();
+
+    // 使用与全刷一致的初始化，局部窗口由 draw_status(true) 内部设置
+    display.init(115200);
+    display.setRotation(ROTATION);
+    u8g2Fonts.begin(display);
+
+    draw_status(true); // partial=true
+
+    display.powerOff();
+    display.hibernate();
+    Serial.println("[Task] screen partial status update end...");
+
+    // 更新局部刷新计数，每 24 次做一次全刷防残影
+    Preferences pref;
+    pref.begin(PREF_NAMESPACE, false);
+    uint8_t cnt = pref.getUChar(PREF_PARTIAL_CNT, 0) + 1;
+    if (cnt >= 24) {
+        cnt = 0;
+        // 标记需要全刷：清除 FULL_DATE 强制下次全刷
+        pref.putString(PREF_FULL_DATE, "");
+        Serial.println("[Task] partial refresh limit reached, next will be full refresh.");
+    }
+    pref.putUChar(PREF_PARTIAL_CNT, cnt);
+    pref.end();
+
+    _screen_status = 1;
 }
 
 void print_status() {
