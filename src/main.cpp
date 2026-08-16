@@ -14,7 +14,6 @@
 #include "weather.h"
 #include "screen_ink.h"
 #include "_preference.h"
-#include "openai_usage.h"
 #include "deepseek.h"
 
 #include "version.h"
@@ -225,21 +224,12 @@ void loop() {
         while (_sntp_status() == 0) { delay(100); }
         Serial.printf("SNTP status: %d\r\n", _sntp_status());
 
-        // 步骤3：查天气 + DeepSeek（含 token 计数）
-        Serial.println("Step 3: Query weather & OpenAI usage...");
+        // 步骤3：查天气预报和 DeepSeek；OpenAI 用量暂时屏蔽。
+        Serial.println("Step 3: Query weather forecast & DeepSeek...");
         weather_exec();
-        openai_usage_exec();
         deepseek_exec();
-        while (weather_status() == 0 || openai_usage_status() == 0 || deepseek_status() == 0) { delay(100); }
-        Serial.printf("Weather: %d  OpenAI usage: %d  DeepSeek: %d\r\n",
-                      weather_status(), openai_usage_status(), deepseek_status());
-
-        if (openai_usage_status() == 1) {
-            OpenAIUsageData* usage = openai_usage_data();
-            Serial.printf("OpenAI UTC %s: input=%u output=%u total=%u\r\n",
-                          usage->dateUtc.c_str(), usage->inputTokens,
-                          usage->outputTokens, usage->totalTokens);
-        }
+        while (weather_status() == 0 || deepseek_status() == 0) { delay(100); }
+        Serial.printf("Weather: %d  DeepSeek: %d\r\n", weather_status(), deepseek_status());
         if (deepseek_status() == 1) {
             DeepSeekData* ds = deepseek_data();
             Serial.printf("DeepSeek: Flash=%u Pro=%u\r\n",

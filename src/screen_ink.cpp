@@ -5,7 +5,6 @@
 #include <API.hpp>
 #include <deepseek.h>
 #include <daily_brief.h>
-#include <openai_usage.h>
 #include "holiday.h"
 #include "nongli.h"
 
@@ -1018,6 +1017,52 @@ void draw_compact_calendar() {
     }
 }
 
+static void draw_weather_forecast_card(int16_t x, int16_t y, int16_t width, int16_t height) {
+    display.drawRoundRect(x, y, width, height, 4, GxEPD_BLACK);
+    display.fillRoundRect(x, y, width, 16, 4, GxEPD_BLACK);
+
+    u8g2Fonts.setFont(FONT_SUB);
+    u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
+    u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+    const char* title = "天气预报";
+    u8g2Fonts.drawUTF8(x + (width - u8g2Fonts.getUTF8Width(title)) / 2, y + 12, title);
+
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    DailyForecast* forecast = weather_data_daily();
+    if (weather_status() != 1 || forecast->length == 0) {
+        u8g2Fonts.setForegroundColor(GxEPD_RED);
+        const char* message = weather_status() == 3 ? "天气未配置" : "天气不可用";
+        u8g2Fonts.drawUTF8(x + (width - u8g2Fonts.getUTF8Width(message)) / 2, y + 52, message);
+        u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+        return;
+    }
+
+    const uint8_t days = forecast->length < 3 ? forecast->length : 3;
+    const int16_t columnW = width / days;
+    const char* labels[] = { "今天", "明天", "后天" };
+    for (uint8_t day = 0; day < days; ++day) {
+        const DailyWeather& item = forecast->weather[day];
+        const int16_t centerX = x + day * columnW + columnW / 2;
+        u8g2Fonts.setFont(u8g2_font_6x10_tf);
+        u8g2Fonts.drawUTF8(centerX - u8g2Fonts.getUTF8Width(labels[day]) / 2, y + 30, labels[day]);
+
+        u8g2Fonts.setFont(FONT_SUB);
+        const String text = clipUtf8ToWidth(item.textDay, columnW - 6);
+        u8g2Fonts.drawUTF8(centerX - u8g2Fonts.getUTF8Width(text.c_str()) / 2, y + 45, text.c_str());
+
+        char temperature[16];
+        snprintf(temperature, sizeof(temperature), "%d/%d°", item.tempMax, item.tempMin);
+        u8g2Fonts.setFont(u8g2_font_6x10_tf);
+        u8g2Fonts.drawUTF8(centerX - u8g2Fonts.getUTF8Width(temperature) / 2, y + 60, temperature);
+
+        char humidity[16];
+        snprintf(humidity, sizeof(humidity), "湿%d%%", item.humidity);
+        u8g2Fonts.drawUTF8(centerX - u8g2Fonts.getUTF8Width(humidity) / 2, y + 76, humidity);
+        if (day + 1 < days) display.drawFastVLine(x + (day + 1) * columnW, y + 22, height - 27, GxEPD_BLACK);
+    }
+}
+
 void draw_deepseek_token_panel() {
     const int16_t top = CALENDAR_PANEL_HEIGHT;
     const int16_t briefH = 16;
@@ -1025,7 +1070,6 @@ void draw_deepseek_token_panel() {
     const int16_t gap = 4;
     const int16_t cardW = (display.width() - margin * 2 - gap) / 2;
     const int16_t cardH = display.height() - top - briefH - 5;
-    const int16_t openaiX = margin;
     const int16_t deepseekX = margin + cardW + gap;
     const int16_t cardY = top + briefH + 1;
     const int16_t headerH = 16;
@@ -1036,57 +1080,21 @@ void draw_deepseek_token_panel() {
     display.drawFastHLine(0, top, display.width(), GxEPD_BLACK);
     draw_daily_brief(top + 12);
     display.drawFastHLine(0, top + briefH, display.width(), GxEPD_BLACK);
-    display.drawRoundRect(openaiX, cardY, cardW, cardH, 4, GxEPD_RED);
+    draw_weather_forecast_card(margin, cardY, cardW, cardH);
     display.drawRoundRect(deepseekX, cardY, cardW, cardH, 4, GxEPD_BLACK);
-    display.fillRoundRect(openaiX, cardY, cardW, headerH, 4, GxEPD_RED);
     display.fillRoundRect(deepseekX, cardY, cardW, headerH, 4, GxEPD_BLACK);
     u8g2Fonts.setFontMode(1);
     u8g2Fonts.setFontDirection(0);
     u8g2Fonts.setFont(FONT_SUB);
 
-    u8g2Fonts.setBackgroundColor(GxEPD_RED);
-    u8g2Fonts.setForegroundColor(GxEPD_WHITE);
-    const char* openaiTitle = "OpenAI · UTC";
-    u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(openaiTitle)) / 2,
-                       cardY + 12, openaiTitle);
     u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
+    u8g2Fonts.setForegroundColor(GxEPD_WHITE);
     const char* deepseekTitle = "DeepSeek · Today";
     u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(deepseekTitle)) / 2,
                        cardY + 12, deepseekTitle);
 
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-    if (openai_usage_status() == 1) {
-        OpenAIUsageData* usage = openai_usage_data();
-        u8g2Fonts.setFont(u8g2_font_fub17_tn);
-        snprintf(text, sizeof(text), "%u", usage->totalTokens);
-        u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 39, text);
-        u8g2Fonts.setFont(u8g2_font_6x10_tf);
-        snprintf(text, sizeof(text), "IN %u    OUT %u", usage->inputTokens, usage->outputTokens);
-        u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 54, text);
-        uint32_t total = usage->inputTokens + usage->outputTokens;
-        if (total > 0) {
-            int16_t inputW = (int16_t)((uint32_t)barW * usage->inputTokens / total);
-            int16_t outputW = barW - inputW;
-            if (inputW > 0) display.fillRect(openaiX + barMargin, cardY + 59, inputW, 6, GxEPD_RED);
-            if (outputW > 0) display.fillRect(openaiX + barMargin + inputW, cardY + 59, outputW, 6, GxEPD_BLACK);
-        } else {
-            display.drawRect(openaiX + barMargin, cardY + 59, barW, 6, GxEPD_BLACK);
-        }
-        snprintf(text, sizeof(text), "%s UTC", usage->dateUtc.c_str());
-        u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 80, text);
-    } else {
-        u8g2Fonts.setForegroundColor(GxEPD_RED);
-        u8g2Fonts.setFont(FONT_SUB);
-        const char* message = openai_usage_status() == 3 ? "Proxy not configured" : "Usage unavailable";
-        u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(message)) / 2,
-                           cardY + 51, message);
-        u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-    }
-
     if (deepseek_status() == 1) {
         DeepSeekData* ds = deepseek_data();
         uint32_t total = ds->tokensTodayFlash + ds->tokensTodayPro;

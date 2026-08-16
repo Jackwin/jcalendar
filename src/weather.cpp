@@ -11,10 +11,10 @@ String _qweather_loc;
 int8_t _weather_status = -1;
 int8_t _weather_type = -1;
 Weather _weather_now = {};
-DailyWeather dailyWeather = {};
+DailyWeather dailyWeather[3] = {};
 DailyForecast _daily_forecast = {
-    .weather = &dailyWeather,
-    .length = 1
+    .weather = dailyWeather,
+    .length = 3
 };
 
 int8_t weather_type() {
@@ -48,7 +48,9 @@ void task_weather(void* param) {
     if (_weather_type == 0) {
         success = api.getForecastDaily(_daily_forecast, _qweather_host.c_str(), _qweather_key.c_str(), _qweather_loc.c_str());
     } else {
-        success = api.getWeatherNow(_weather_now, _qweather_host.c_str(), _qweather_key.c_str(), _qweather_loc.c_str());
+        const bool nowOk = api.getWeatherNow(_weather_now, _qweather_host.c_str(), _qweather_key.c_str(), _qweather_loc.c_str());
+        const bool forecastOk = api.getForecastDaily(_daily_forecast, _qweather_host.c_str(), _qweather_key.c_str(), _qweather_loc.c_str());
+        success = nowOk || forecastOk;
     }
     if (success) {
         _weather_status = 1;
@@ -100,4 +102,3 @@ void weather_stop() {
     }
     _weather_status = 2;
 }
-
