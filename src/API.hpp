@@ -106,8 +106,11 @@ private:
                         // gzip解压缩
                         uint8_t* outBuf = NULL;
                         uint32_t outLen = 0;
-                        ArduinoUZlib::decompress((uint8_t*)s.c_str(), (uint32_t)s.length(), outBuf, outLen);
-                        error = deserializeJson(doc, (char*)outBuf, outLen);
+                        const bool decompressed = ArduinoUZlib::decompress(
+                            (uint8_t*)s.c_str(), (uint32_t)s.length(), outBuf, outLen);
+                        error = decompressed && outBuf != NULL
+                            ? deserializeJson(doc, (char*)outBuf, outLen)
+                            : DeserializationError::InvalidInput;
                         free(outBuf);
                     } else {
                         error = deserializeJson(doc, s);
@@ -224,8 +227,9 @@ public:
                 return false;
             }
             result.updateTime = String(json["updateTime"].as<const char*>());
+            const uint8_t days = json["daily"].size();
             uint8_t i;
-            for (i = 0; i < result.length; i++) {
+            for (i = 0; i < result.length && i < days; i++) {
                 DailyWeather& weather = result.weather[i];
                 JsonObject daily = json["daily"][i];
                 weather.date = daily["fxDate"].as<const char*>();

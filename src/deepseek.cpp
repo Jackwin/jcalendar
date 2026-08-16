@@ -8,6 +8,10 @@
 
 #include "_preference.h"
 
+#if __has_include("openai_usage_secrets.h")
+#include "openai_usage_secrets.h"
+#endif
+
 // 调用的 DeepSeek 模型
 #define DS_MODEL_FLASH "deepseek-v4-flash"
 #define DS_MODEL_PRO   "deepseek-v4-pro"
@@ -153,20 +157,16 @@ void task_deepseek(void* param) {
 
     loadTodayTokens();
 
-    // 分别调用 flash 和 pro 模型
+    // 只调用 flash（省钱），pro token 从 NVS 历史累计
     bool flashOk = callDeepSeekModel(_ds_key, DS_MODEL_FLASH, true);
     if (flashOk) {
         addTodayTokens(_deepseek_data.flashTotalTokens, 0);
     }
-    bool proOk = callDeepSeekModel(_ds_key, DS_MODEL_PRO, false);
-    if (proOk) {
-        addTodayTokens(0, _deepseek_data.proTotalTokens);
-    }
     bool balOk = callDeepSeekBalance(_ds_key);
 
-    _deepseek_status = (flashOk || proOk || balOk) ? 1 : 2;
-    Serial.printf("[Task] deepseek end. flash=%d pro=%d bal=%d today(flash=%u,pro=%u) balance=%s %s\n",
-                  flashOk, proOk, balOk,
+    _deepseek_status = (flashOk || balOk) ? 1 : 2;
+    Serial.printf("[Task] deepseek end. flash=%d bal=%d today(flash=%u,pro=%u) balance=%s %s\n",
+                  flashOk, balOk,
                   _deepseek_data.tokensTodayFlash, _deepseek_data.tokensTodayPro,
                   _deepseek_data.currency.c_str(), _deepseek_data.totalBalance.c_str());
 
@@ -189,6 +189,12 @@ void deepseek_exec(int status) {
     pref.begin(PREF_NAMESPACE, true);
     _ds_key = pref.getString(PREF_DS_KEY, "");
     pref.end();
+
+#if __has_include("openai_usage_secrets.h")
+    if (String(DEEPSEEK_API_KEY).length() > 0) {
+        _ds_key = DEEPSEEK_API_KEY;
+    }
+#endif
 
     if (_ds_key.length() == 0) {
         Serial.println("DeepSeek key not configured.");

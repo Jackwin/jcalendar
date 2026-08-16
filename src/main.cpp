@@ -14,6 +14,7 @@
 #include "weather.h"
 #include "screen_ink.h"
 #include "_preference.h"
+#include "openai_usage.h"
 #include "deepseek.h"
 
 #include "version.h"
@@ -37,7 +38,6 @@ WiFiManagerParameter para_cd_day_date("cd_day_date", "日期（yyyyMMdd）", "",
 WiFiManagerParameter para_tag_days("tag_days", "日期Tag（yyyyMMddx，详见README）", "", 30); //     日期Tag
 WiFiManagerParameter para_si_week_1st("si_week_1st", "每周起始（0:周日，1:周一）", "0", 2, "pattern='\\[0-1]{1}'"); //     每周第一天
 WiFiManagerParameter para_study_schedule("study_schedule", "课程表", "0", 4000, "pattern='\\[0-9]{3}[;]$'"); //     每周第一天
-WiFiManagerParameter para_deepseek_key("deepseek_key", "DeepSeek API Key", "", 64); //     DeepSeek API Key（用于显示token用量/余额）
 WiFiManagerParameter para_refresh_mode("refresh_mode", "刷新模式(0全刷/1LUT)", "0", 1); //  屏幕刷新模式
 
 #include <WebServer.h>
@@ -90,13 +90,21 @@ unsigned long TIME_TO_SLEEP = 180 * 1000;
 
 bool _wifi_flag = false;
 unsigned long _wifi_failed_millis;
-volatile bool _configRequested = false;  // 双击标志位
+volatile bool _configRequested = false;
+bool _startWebOnConnect = false;
+bool _webRunning = false;
 void setup() {
     delay(10);
     Serial.begin(115200);
     Serial.println();
-    Serial.println("=== J-Calendar Minimal Debug ===");
+    Serial.println("=== J-Calendar ===");
     Serial.printf("Version: %s\r\n", J_VERSION);
+
+    // 清除全刷标记，强制本次全屏刷新
+    Preferences p;
+    p.begin(PREF_NAMESPACE, false);
+    p.putString(PREF_FULL_DATE, "");  // 清空 = 强制全刷
+    p.end();
 
     led_init();
     led_on();
@@ -107,186 +115,126 @@ void setup() {
     button.setClickMs(300);
     button.setPressMs(3000);
     button.attachDoubleClick([]() {
-        Preferences p;
-        p.begin(PREF_NAMESPACE, true);
-        String savedKey = p.getString(PREF_DS_KEY, "");
-        p.end();
         Serial.println("=== DOUBLE CLICK - will open config portal ===");
-        Serial.print("Saved DS Key: ");
-        Serial.println(savedKey.length() > 0 ? savedKey.substring(0,8) + "..." : "(empty)");
+        Serial.println("Cloud-service credentials are local-only and cannot be changed from the web page.");
         _configRequested = true;
     });
     attachInterrupt(digitalPinToInterrupt(KEY_M), checkTicks, CHANGE);
-    
-    Serial.println("Ready. Double-click button to configure DeepSeek Key.");
+
+    Serial.println("Ready. Web config at http://J-Calendar.local (after WiFi)");
     Serial.println("------------------------------------------");
 }
 
 void loop() {
     button.tick();
-    wm.process();
-    
-    // 双击触发 → 打开网页配置（ESP32 WebServer，任何时间都能访问）
+
+    // 持续处理 Web 请求（服务器在 WiFi 连接后启动）
+    configServer.handleClient();
+
+    // 双击 → 将在 WiFi 连接后自动打开配置页面
     if (_configRequested) {
         _configRequested = false;
-        Serial.println("=== Opening Web Config ===");
-        Serial.printf("Visit http://%s/ to configure DeepSeek Key\r\n", WiFi.localIP().toString().c_str());
-        
-        // 设置 Web 路由
-        configServer.on("/", [](){
-            String html = "<html><head><meta charset='utf-8'><title>J-Calendar</title></head><body>";
-            html += "<h2>J-Calendar 配置</h2>";
-            html += "<form action='/save' method='POST'>";
-            html += "DeepSeek API Key: <input type='text' name='key' size='40' value='";
-            Preferences p;
-            p.begin(PREF_NAMESPACE, true);
-            html += p.getString(PREF_DS_KEY, "");
-            p.end();
-            html += "'><br><br>";
-            html += "<input type='submit' value='保存'>";
-            html += "</form></body></html>";
-            configServer.send(200, "text/html", html);
-        });
-        
-        configServer.on("/save", [](){
-            if (configServer.hasArg("key")) {
-                String key = configServer.arg("key");
-                Preferences p;
-                p.begin(PREF_NAMESPACE, false);
-                p.putString(PREF_DS_KEY, key);
-                p.end();
-                configServer.send(200, "text/html", 
-                    "<html><meta charset='utf-8'><body>"
-                    "<h2>✅ Key 已保存！</h2>"
-                    "<p>设备将在 3 秒后重启...</p>"
-                    "</body></html>");
-                Serial.println("[Config] Key saved via web! Restarting...");
-                delay(3000);
-                ESP.restart();
-            } else {
-                configServer.send(400, "text/html", "Missing key parameter");
-            }
-        });
-        
-        configServer.begin();
-        Serial.println("[Config] Web server started on port 80");
-        Serial.printf("[Config] Visit http://%s/\r\n", WiFi.localIP().toString().c_str());
-        
-        // 运行 Web 服务器 2 分钟
-        led_config();
-        unsigned long configStart = millis();
-        while (millis() - configStart < 120000) {
-            configServer.handleClient();
-            button.tick();
-            delay(10);
-        }
-        configServer.stop();
-        Serial.println("[Config] Web server stopped");
-        led_on();
-        return;
+        Serial.println("=== DOUBLE CLICK! Web config ready after WiFi ===");
+        // 标记：WiFi 连接后自动启动 Web 服务器
+        _startWebOnConnect = true;
     }
-    
+
     // 配置门户运行中，不执行主流程
     if (wm.getConfigPortalActive()) {
         delay(10);
         return;
     }
-    
+
     // 主流程：只执行一次
     static bool mainDone = false;
     if (mainDone) {
         delay(10);
         return;
     }
-    
-    // 启动后等待 20 秒，方便用户双击进入配置
-    static unsigned long bootTime = millis();
-    if (millis() - bootTime < 20000) {
-        if (millis() - bootTime < 100) {
-            Serial.println("------------------------------------------");
-            Serial.println("[INFO] Double-click button to open Web Config.");
-            Serial.printf("[INFO] 20 seconds countdown...\r\n");
-        }
-        if ((millis() - bootTime) % 5000 < 15) {
-            Serial.printf("[%lu] Double-click for config...\r\n", 20 - (millis() - bootTime) / 1000);
-        }
-        delay(10);
-        return;
-    }
-    
     mainDone = true;
-    
+
     // 步骤1：连 WiFi
     Serial.println("Step 1: Connecting WiFi...");
     WiFi.mode(WIFI_STA);
     wm.setHostname("J-Calendar");
     wm.setEnableConfigPortal(false);
     wm.setConnectTimeout(10);
-    
+
     if (wm.autoConnect()) {
         Serial.println("WiFi OK!");
-        
+
+        // WiFi 连上后自动启动 Web 配置服务器
+        if (!_webRunning) {
+            configServer.on("/", [](){
+                String html = "<html><meta charset='utf-8'><title>J-Calendar</title>";
+                html += "<style>body{font-size:1.2em;margin:20px}</style><body>";
+                html += "<h2>J-Calendar</h2>";
+                html += "<p>Cloud-service credentials are provisioned locally at build time and cannot be viewed or changed from this page.</p>";
+                html += "</body></html>";
+                configServer.send(200, "text/html", html);
+            });
+            configServer.begin();
+            _webRunning = true;
+            Serial.printf("=== Web: http://%s/ ===\r\n", WiFi.localIP().toString().c_str());
+        }
+
         // 步骤2：同步时间
         Serial.println("Step 2: Sync SNTP...");
         _sntp_exec();
         while (_sntp_status() == 0) { delay(100); }
         Serial.printf("SNTP status: %d\r\n", _sntp_status());
-        
-        // 步骤3：查 DeepSeek 余额（仅余额，不消耗 token）
-        Serial.println("Step 3: Query DeepSeek balance...");
-        deepseek_exec_balance_only();
-        while (deepseek_status() == 0) { delay(100); }
-        Serial.printf("DeepSeek status: %d\r\n", deepseek_status());
-        
+
+        // 步骤3：查天气 + DeepSeek（含 token 计数）
+        Serial.println("Step 3: Query weather & OpenAI usage...");
+        weather_exec();
+        openai_usage_exec();
+        deepseek_exec();
+        while (weather_status() == 0 || openai_usage_status() == 0 || deepseek_status() == 0) { delay(100); }
+        Serial.printf("Weather: %d  OpenAI usage: %d  DeepSeek: %d\r\n",
+                      weather_status(), openai_usage_status(), deepseek_status());
+
+        if (openai_usage_status() == 1) {
+            OpenAIUsageData* usage = openai_usage_data();
+            Serial.printf("OpenAI UTC %s: input=%u output=%u total=%u\r\n",
+                          usage->dateUtc.c_str(), usage->inputTokens,
+                          usage->outputTokens, usage->totalTokens);
+        }
         if (deepseek_status() == 1) {
             DeepSeekData* ds = deepseek_data();
-            Serial.printf("Balance: %s %s\r\n", ds->currency.c_str(), ds->totalBalance.c_str());
-            Serial.printf("Today: Flash=%u Pro=%u\r\n", ds->tokensTodayFlash, ds->tokensTodayPro);
+            Serial.printf("DeepSeek: Flash=%u Pro=%u\r\n",
+                          ds->tokensTodayFlash, ds->tokensTodayPro);
         }
-        
-        // 步骤4：显示屏幕
-        // 首次启动：全刷。后续唤醒：仅局部刷新状态栏（DeepSeek数据变化时才刷）
-        time_t now = 0;
-        time(&now);
-        struct tm t;
-        localtime_r(&now, &t);
-        char todayBuf[9];
-        snprintf(todayBuf, sizeof(todayBuf), "%04d%02d%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
-        
-        Preferences pref;
-        pref.begin(PREF_NAMESPACE, true);
-        String fullDate = pref.getString(PREF_FULL_DATE, "");
-        bool todayFullDone = (fullDate == String(todayBuf));
-        pref.end();
-        
-        if (!todayFullDone) {
-            // 今日首次 = 全刷
-            Serial.println("Step 4: FULL screen refresh...");
-            si_screen();
-        } else {
-            // 今日非首次 = 局部刷新状态栏（免闪屏）
-            Serial.println("Step 4: PARTIAL status refresh (no flicker)...");
-            si_screen_partial_status();
-        }
+
+        // 步骤4：显示屏幕——强制全刷（调试用）
+        Serial.println("Step 4: FULL screen refresh (forced)...");
+        si_screen();
         while (si_screen_status() == 0) { delay(100); }
         Serial.printf("Screen status: %d\r\n", si_screen_status());
-        
+
     } else {
         Serial.println("WiFi FAILED!");
     }
-    
+
+    // 保持 WiFi + Web 30 秒方便配置
+    Serial.printf("=== Web: http://%s/ === (30s window)\r\n", WiFi.localIP().toString().c_str());
+    unsigned long webStart = millis();
+    while (millis() - webStart < 30000) {
+        configServer.handleClient();
+        delay(10);
+    }
+
     WiFi.mode(WIFI_OFF);
-    
+
     // 计算下次唤醒时间：每小时整点
     time_t now2 = 0;
     time(&now2);
     struct tm local;
     localtime_r(&now2, &local);
     int secsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec + 10;
-    
+
     Serial.printf("Deep sleep %ds until next hour...\r\n", secsToNextHour);
     delay(100);
-    
+
     esp_sleep_enable_timer_wakeup((uint64_t)secsToNextHour * 1000000ULL);
     esp_sleep_enable_ext0_wakeup(KEY_M, LOW);
     esp_deep_sleep_start();
@@ -324,7 +272,6 @@ void saveParamsCallback() {
     pref.putString(PREF_TAG_DAYS, para_tag_days.getValue());
     pref.putString(PREF_SI_WEEK_1ST, strcmp(para_si_week_1st.getValue(), "1") == 0 ? "1" : "0");
     pref.putString(PREF_STUDY_SCHEDULE, para_study_schedule.getValue());
-    pref.putString(PREF_DS_KEY, para_deepseek_key.getValue());
     pref.putUChar(PREF_REFRESH_MODE, strcmp(para_refresh_mode.getValue(), "1") == 0 ? 1 : 0);
     pref.end();
 
@@ -364,7 +311,6 @@ void buttonDoubleClick(void* oneButton) {
     String tagDays = pref.getString(PREF_TAG_DAYS);
     String week1st = pref.getString(PREF_SI_WEEK_1ST, "0");
     String studySchedule = pref.getString(PREF_STUDY_SCHEDULE);
-    String dsKey = pref.getString(PREF_DS_KEY);
     String refreshMode = pref.getUChar(PREF_REFRESH_MODE, 0) == 1 ? "1" : "0";
     pref.end();
 
@@ -377,7 +323,6 @@ void buttonDoubleClick(void* oneButton) {
     para_tag_days.setValue(tagDays.c_str(), 30);
     para_si_week_1st.setValue(week1st.c_str(), 1);
     para_study_schedule.setValue(studySchedule.c_str(), 4000);
-    para_deepseek_key.setValue(dsKey.c_str(), 64);
     para_refresh_mode.setValue(refreshMode.c_str(), 1);
 
     wm.setTitle("J-Calendar");
@@ -390,7 +335,6 @@ void buttonDoubleClick(void* oneButton) {
     wm.addParameter(&para_cd_day_date);
     wm.addParameter(&para_tag_days);
     wm.addParameter(&para_study_schedule);
-    wm.addParameter(&para_deepseek_key);
     wm.addParameter(&para_refresh_mode);
     // std::vector<const char *> menu = {"wifi","wifinoscan","info","param","custom","close","sep","erase","update","restart","exit"};
     std::vector<const char*> menu = { "wifi","param","update","sep","info","restart","exit" };
@@ -480,13 +424,13 @@ void go_sleep() {
 
     // 省电考虑，关闭RTC外设和存储器
     // esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF); // RTC IO, sensors and ULP, 注意：由于需要按键唤醒，所以不能关闭，否则会导致RTC_IO唤醒(ext0)失败
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_OFF); // 
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_OFF); //
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
     esp_sleep_pd_config(ESP_PD_DOMAIN_XTAL, ESP_PD_OPTION_OFF);
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC8M, ESP_PD_OPTION_OFF);
 
     gpio_deep_sleep_hold_dis(); // 解除所有引脚的保持状态
-    
+
     // 省电考虑，重置gpio，平均每针脚能省8ua。
     // gpio_reset_pin(PIN_LED_R); // 减小deep-sleep电流
     gpio_reset_pin(SPI_CS); // 减小deep-sleep电流

@@ -4,6 +4,7 @@
 #include <weather.h>
 #include <API.hpp>
 #include <deepseek.h>
+#include <openai_usage.h>
 #include "holiday.h"
 #include "nongli.h"
 
@@ -21,6 +22,7 @@ uint8_t _refresh_mode = 0;
 
 #include "font.h"
 #define ROTATION 0
+#define CALENDAR_PANEL_HEIGHT 190
 
 #include "wiring.h"
 GxEPD2_DISPLAY_CLASS<GxEPD2_DRIVER_CLASS, GxEPD2_DRIVER_CLASS::HEIGHT> display(GxEPD2_DRIVER_CLASS(/*CS=D8*/ SPI_CS, /*DC=D3*/ SPI_DC, /*RST=D4*/ SPI_RST, /*BUSY=D2*/ SPI_BUSY));
@@ -45,9 +47,9 @@ int _week_1st;
 int lunarDates[31];
 int jqAccDate[24]; // 节气积累日
 
-const int jrLength = 11;
 const int jrDate[] = { 101, 214, 308, 312, 501, 504, 601, 701, 801, 910, 1001, 1224, 1225 };
 const String jrText[] = { "元旦", "情人节", "妇女节", "植树节", "劳动节", "青年节", "儿童节", "建党节", "建军节", "教师节", "国庆节", "平安夜", "圣诞节" };
+const size_t jrLength = sizeof(jrDate) / sizeof(jrDate[0]);
 
 int _si_type = 0;
 String _study_schedule;
@@ -105,50 +107,37 @@ struct
 TaskHandle_t SCREEN_HANDLER;
 
 void init_cal_layout_size() {
-    calLayout.topX = 0;
-    calLayout.topY = 0;
-    calLayout.topW = 180;
-    calLayout.topH = 60;
+    // ===== 坐标系定义（400x300 三色屏） =====
+    // Y:  0- 30  顶部日期行（2026年7月19日）
+    // Y: 30- 40  第几周
+    // Y: 40- 50  倒计日（可选）
+    // Y: 50- 64  星期头部（日一二三四五六）
+    // Y: 64-232  日历网格（6行 × 28px/行 = 168px）
+    // Y:234-238  分隔线（粗黑线）
+    // Y:238-298  下半区：DeepSeek Token + 三天天气
 
-    calLayout.yearX = 10;
-    calLayout.yearY = calLayout.topH - 28;
-    calLayout.weekX = 10;
-    calLayout.weekY = calLayout.topH - 5;
+    calLayout.topX = 0;      calLayout.topY = 0;
+    calLayout.topW = 160;    calLayout.topH = 30;
 
-    calLayout.lunarYearX = calLayout.topX + calLayout.topW + 15;
-    calLayout.lunarYearY = calLayout.yearY / 2;
-    calLayout.lunarDayX = calLayout.topX + calLayout.topW + 15;
-    calLayout.lunarDayY = calLayout.yearY;
+    calLayout.yearX = 5;     calLayout.yearY = 26;
+    calLayout.weekX = 5;     calLayout.weekY = 38;
 
-    calLayout.cdDayX = 0;
-    calLayout.cdDayY = calLayout.topH - 5;
+    calLayout.lunarYearX = 170;  calLayout.lunarYearY = 12;
+    calLayout.lunarDayX = 170;   calLayout.lunarDayY = 26;
 
-    calLayout.tX = calLayout.topX + calLayout.topW;
-    calLayout.tY = calLayout.topY;
-    calLayout.tW = 60;
-    calLayout.tH = calLayout.topH / 2;
+    calLayout.statusX = 300;     calLayout.statusY = 0;
+    calLayout.statusW = 100;     calLayout.statusH = 16;
+    calLayout.weatherX = 300;    calLayout.weatherY = 0;
+    calLayout.weatherW = 100;    calLayout.weatherH = 60;
 
-    calLayout.statusX = 300;
-    calLayout.statusY = 0;
-    calLayout.statusW = display.width() - calLayout.weatherX;
-    calLayout.statusH = 14;
+    calLayout.cdDayX = 0;    calLayout.cdDayY = 48;
 
-    calLayout.weatherX = 300;
-    calLayout.weatherY = calLayout.topY;
-    calLayout.weatherW = display.width() - calLayout.weatherX;
-    calLayout.weatherH = calLayout.topH;
+    calLayout.headerX = 0;   calLayout.headerY = 50;
+    calLayout.headerW = 400; calLayout.headerH = 14;
 
-    calLayout.headerX = calLayout.topX;
-    calLayout.headerY = calLayout.topY + calLayout.topH;
-    calLayout.headerW = display.width();
-    calLayout.headerH = 20;
-
-    calLayout.daysX = calLayout.topX;
-    calLayout.daysY = calLayout.headerY + calLayout.headerH;
-    calLayout.daysW = calLayout.headerW;
-    calLayout.daysH = display.height() - calLayout.daysX;
-    calLayout.dayW = 56;
-    calLayout.dayH = 44;
+    calLayout.daysX = 0;     calLayout.daysY = 64;
+    calLayout.daysW = 400;   calLayout.daysH = 168;  // 6 × 28
+    calLayout.dayW = 57;     calLayout.dayH = 28;
 }
 
 void draw_cal_header() {
@@ -297,8 +286,11 @@ void draw_cal_days(bool partial) {
         String d = _tag_days_str.substring(indexBegin + 6, indexBegin + 8);
         char t = _tag_days_str.charAt(indexBegin + 8);
 
-        if ((y.equals(String(tmInfo.tm_year + 1900)) || y.equals("0000")) && (m.equals(String(tmInfo.tm_mon + 1)) || m.equals("00"))) {
-            tags[d.toInt()] = t;
+        const int tagDay = d.toInt();
+        if ((y.equals(String(tmInfo.tm_year + 1900)) || y.equals("0000"))
+            && (m.equals(String(tmInfo.tm_mon + 1)) || m.equals("00"))
+            && tagDay >= 1 && tagDay <= 31) {
+            tags[tagDay - 1] = t;
         }
 
         // Serial.printf("Format: %s, %s, %s, %c\n", y.c_str(), m.c_str(), d.c_str(), t);
@@ -325,13 +317,14 @@ void draw_cal_days(bool partial) {
     int jqIndex = 0;
     int jrIndex = 0;
     int shiftDay = (wday1 - _week_1st) >= 0 ? 0 : 7;
+    int16_t dh = calLayout.dayH;
+    int16_t dw = calLayout.dayW;
     for (size_t iDay = 0; iDay < totalDays; iDay++) {
-        uint8_t num = wday1 + iDay - _week_1st + shiftDay; // 根据每周首日星期做偏移
-        uint8_t column = num % 7; //(0~6)
-        uint8_t row = num / 7;    //(0~4)
-        if (row == 5) row = 0;
-        int16_t x = calLayout.daysX + 4 + column * 56;
-        int16_t y = calLayout.daysY + row * 44;
+        uint8_t num = wday1 + iDay - _week_1st + shiftDay;
+        uint8_t column = num % 7;
+        uint8_t row = num / 7;
+        int16_t x = calLayout.daysX + column * dw;
+        int16_t y = calLayout.daysY + row * dh;
 
         // 周六、日，字体红色
         uint16_t color;
@@ -351,12 +344,12 @@ void draw_cal_days(bool partial) {
                         color = GxEPD_RED;
                         u8g2Fonts.setForegroundColor(color);
                         u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
-                        u8g2Fonts.drawUTF8(x + 44, y + 11, "\u006c");
+                        u8g2Fonts.drawUTF8(x + dw - 6, y + dh / 2, "\u006c");
                     } else if (_holiday.holidays[holidayIndex] < 0) { // 调班
                         color = GxEPD_BLACK;
                         u8g2Fonts.setForegroundColor(color);
                         u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
-                        u8g2Fonts.drawUTF8(x + 44, y + 11, "\u0064");
+                        u8g2Fonts.drawUTF8(x + dw - 6, y + dh / 2, "\u0064");
                     }
                     break;
                 }
@@ -366,12 +359,12 @@ void draw_cal_days(bool partial) {
         u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
 
         // 画日历日期数字
-        u8g2Fonts.setFont(u8g2_font_fub17_tn); // u8g2_font_fub17_tn，u8g2_font_logisoso18_tn
-        int16_t numX = x + (56 - u8g2Fonts.getUTF8Width(String(iDay + 1).c_str())) / 2;
-        int16_t numY = y + 22;
-        u8g2Fonts.drawUTF8(numX, numY, String(iDay + 1).c_str()); // 画日历日期
+        u8g2Fonts.setFont(u8g2_font_fub17_tn);
+        int16_t numX = x + (dw - u8g2Fonts.getUTF8Width(String(iDay + 1).c_str())) / 2;
+        int16_t numY = y + dh - 6;
+        u8g2Fonts.drawUTF8(numX, numY, String(iDay + 1).c_str());
 
-        // 画节气&节日&农历       
+        // 画节气&节日&农历
         String lunarStr = "";
         int lunarDate = lunarDates[iDay];
         int isLeapMon = lunarDate < 0 ? 1 : 0; // 闰月
@@ -434,16 +427,16 @@ void draw_cal_days(bool partial) {
             }
         }
         // 画节气/节日/农历文字
-        u8g2Fonts.setFont(FONT_TEXT);
-        u8g2Fonts.drawUTF8(x + (56 - u8g2Fonts.getUTF8Width(lunarStr.c_str())) / 2, y + 44 - 4, lunarStr.c_str());
+        u8g2Fonts.setFont(FONT_SUB);
+        u8g2Fonts.drawUTF8(x + (dw - u8g2Fonts.getUTF8Width(lunarStr.c_str())) / 2, y + dh - 2, lunarStr.c_str());
 
         // 今日日期
         if ((iDay + 1) == tmInfo.tm_mday) { // 双线加粗
             todayColor = color;
 
             // 加框线
-            display.drawRoundRect(x, y + 1, 56, 44, 4, GxEPD_RED);
-            display.drawRoundRect(x + 1, y + 2, 54, 42, 3, GxEPD_RED);
+            display.drawRoundRect(x, y + 1, dw, dh, 4, GxEPD_RED);
+            display.drawRoundRect(x + 1, y + 2, dw - 2, dh - 2, 3, GxEPD_RED);
 
             // 今日农历年份，e.g. 乙巳年 蛇
             // 如果农历月份小于公历月份，那么说明是上一年
@@ -467,22 +460,22 @@ void draw_cal_days(bool partial) {
 
         // 画日期Tag
         const char* tagChar = NULL;
-        if (tags[iDay + 1] == 'a') { //tag
+        if (tags[iDay] == 'a') { //tag
             tagChar = "\u0042";
-        } else if (tags[iDay + 1] == 'b') { // dollar
+        } else if (tags[iDay] == 'b') { // dollar
             tagChar = "\u0024";
-        } else if (tags[iDay + 1] == 'c') { // smile
+        } else if (tags[iDay] == 'c') { // smile
             tagChar = "\u0053";
-        } else if (tags[iDay + 1] == 'd') { // warning
+        } else if (tags[iDay] == 'd') { // warning
             tagChar = "\u0021";
         }
         if (tagChar != NULL) {
             u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
             u8g2Fonts.setForegroundColor(GxEPD_RED);
             u8g2Fonts.setFont(u8g2_font_twelvedings_t_all);
-            int iconX = numX - u8g2Fonts.getUTF8Width(tagChar) - 1; // 数字与tag间间隔1像素
-            iconX = iconX <= (x + 3) ? (iconX + 1) : iconX; // 防止icon与今日框线产生干涉。
-            int iconY = y + 15;
+            int iconX = numX - u8g2Fonts.getUTF8Width(tagChar) - 1;
+            iconX = iconX <= (x + 3) ? (iconX + 1) : iconX;
+            int iconY = y + dh / 2;
             u8g2Fonts.drawUTF8(iconX, iconY, tagChar);
         }
 
@@ -848,14 +841,14 @@ void draw_status(bool partial) {
             text += curSym + ds->totalBalance;
         }
         Serial.printf("[draw_status] text=%s\r\n", text.c_str());
-        
+
         // 红色背景框确认位置
         u8g2Fonts.setFont(FONT_SUB);
         int16_t textW = u8g2Fonts.getUTF8Width(text.c_str());
         int16_t x = 400 - 12 - 4 - textW;
         int16_t y = 10;
         display.fillRect(x - 2, 0, textW + 4, 16, GxEPD_RED);
-        
+
         Serial.printf("[draw_status] draw at x=%d y=%d w=%d\r\n", x, y, textW);
         u8g2Fonts.setForegroundColor(GxEPD_WHITE);
         u8g2Fonts.drawUTF8(x, y, text.c_str());
@@ -883,6 +876,199 @@ void draw_status(bool partial) {
 
     if (partial) {
         display.nextPage();
+    }
+}
+
+static String compactLunarLabel(int day) {
+    int lunarDate = lunarDates[day - 1];
+    const bool leapMonth = lunarDate < 0;
+    lunarDate = abs(lunarDate);
+    const int lunarMonth = lunarDate / 100;
+    const int lunarDay = lunarDate % 100;
+
+    // Solar terms and public festivals take precedence over the regular lunar day.
+    const int accumulatedDays = tmInfo.tm_yday + 1 - tmInfo.tm_mday + day;
+    for (int i = 0; i < 24; ++i) {
+        if (jqAccDate[i] == accumulatedDays) return String(nl_jq_text[i]);
+    }
+    const int dateNumber = (tmInfo.tm_mon + 1) * 100 + day;
+    for (size_t i = 0; i < jrLength; ++i) {
+        if (jrDate[i] == dateNumber) return jrText[i];
+    }
+
+    if (lunarMonth == 1 && lunarDay == 1) return "春节";
+    if (lunarMonth == 1 && lunarDay == 15) return "元宵";
+    if (lunarMonth == 5 && lunarDay == 5) return "端午";
+    if (lunarMonth == 7 && lunarDay == 7) return "七夕";
+    if (lunarMonth == 8 && lunarDay == 15) return "中秋";
+    if (lunarMonth == 9 && lunarDay == 9) return "重阳";
+
+    if (lunarDay == 1) {
+        return String(leapMonth ? "闰" : "") + nl_mon_str[lunarMonth] + "月";
+    }
+    if (lunarDay == 10) return "初十";
+    if (lunarDay == 20) return "二十";
+    if (lunarDay == 30) return "三十";
+    return nl10_str[lunarDay / 10] + nl_str[lunarDay % 10];
+}
+
+// Compact calendar with Gregorian day and lunar/solar-term label in every cell.
+void draw_compact_calendar() {
+    const int16_t calendarHeight = CALENDAR_PANEL_HEIGHT;
+    const int16_t monthY = 20;
+    const int16_t headerY = 28;
+    const int16_t daysY = 46;
+    const int16_t dayW = display.width() / 7;
+    const int16_t dayH = (calendarHeight - daysY) / 6;
+
+    u8g2Fonts.setFontMode(1);
+    u8g2Fonts.setFontDirection(0);
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    u8g2Fonts.setFont(u8g2_font_fub17_tn);
+    char month[16];
+    snprintf(month, sizeof(month), "%04d-%02d", tmInfo.tm_year + 1900, tmInfo.tm_mon + 1);
+    u8g2Fonts.drawUTF8((display.width() - u8g2Fonts.getUTF8Width(month)) / 2, monthY, month);
+
+    u8g2Fonts.setFont(FONT_SUB);
+    for (int column = 0; column < 7; ++column) {
+        uint16_t color = ((column + _week_1st) % 7 == 0 || (column + _week_1st) % 7 == 6)
+                             ? GxEPD_RED : GxEPD_BLACK;
+        u8g2Fonts.setForegroundColor(color);
+        const String& week = week_str[(column + _week_1st) % 7];
+        u8g2Fonts.drawUTF8(column * dayW + (dayW - u8g2Fonts.getUTF8Width(week.c_str())) / 2,
+                           headerY + 12, week.c_str());
+    }
+    display.drawFastHLine(0, headerY + 16, display.width(), GxEPD_BLACK);
+
+    int firstWday = (36 - tmInfo.tm_mday + tmInfo.tm_wday) % 7;
+    int shiftDay = (firstWday - _week_1st) >= 0 ? 0 : 7;
+    int daysInMonth = 31;
+    int monthNum = tmInfo.tm_mon + 1;
+    if (monthNum == 4 || monthNum == 6 || monthNum == 9 || monthNum == 11) daysInMonth = 30;
+    if (monthNum == 2) {
+        int year = tmInfo.tm_year + 1900;
+        daysInMonth = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0) ? 29 : 28;
+    }
+
+    for (int day = 1; day <= daysInMonth; ++day) {
+        int index = firstWday + day - 1 - _week_1st + shiftDay;
+        int column = index % 7;
+        int row = index / 7;
+        int16_t x = column * dayW;
+        int16_t y = daysY + row * dayH;
+        uint16_t color = ((firstWday + day - 1) % 7 == 0 || (firstWday + day - 1) % 7 == 6)
+                             ? GxEPD_RED : GxEPD_BLACK;
+        u8g2Fonts.setForegroundColor(color);
+        u8g2Fonts.setFont(u8g2_font_fub11_tn);
+        String dayText = String(day);
+        u8g2Fonts.drawUTF8(x + (dayW - u8g2Fonts.getUTF8Width(dayText.c_str())) / 2,
+                           y + 11, dayText.c_str());
+
+        String lunarText = compactLunarLabel(day);
+        u8g2Fonts.setFont(FONT_SUB);
+        u8g2Fonts.drawUTF8(x + (dayW - u8g2Fonts.getUTF8Width(lunarText.c_str())) / 2,
+                           y + dayH - 2, lunarText.c_str());
+        if (day == tmInfo.tm_mday) {
+            display.drawRoundRect(x + 1, y, dayW - 2, dayH, 3, GxEPD_RED);
+        }
+    }
+}
+
+void draw_deepseek_token_panel() {
+    const int16_t top = CALENDAR_PANEL_HEIGHT;
+    const int16_t margin = 4;
+    const int16_t gap = 4;
+    const int16_t cardW = (display.width() - margin * 2 - gap) / 2;
+    const int16_t cardH = display.height() - top - 5;
+    const int16_t openaiX = margin;
+    const int16_t deepseekX = margin + cardW + gap;
+    const int16_t cardY = top + 3;
+    const int16_t headerH = 19;
+    const int16_t barMargin = 8;
+    const int16_t barW = cardW - barMargin * 2;
+    char text[64];
+
+    display.drawFastHLine(0, top, display.width(), GxEPD_BLACK);
+    display.drawRoundRect(openaiX, cardY, cardW, cardH, 4, GxEPD_RED);
+    display.drawRoundRect(deepseekX, cardY, cardW, cardH, 4, GxEPD_BLACK);
+    display.fillRoundRect(openaiX, cardY, cardW, headerH, 4, GxEPD_RED);
+    display.fillRoundRect(deepseekX, cardY, cardW, headerH, 4, GxEPD_BLACK);
+    u8g2Fonts.setFontMode(1);
+    u8g2Fonts.setFontDirection(0);
+    u8g2Fonts.setFont(FONT_SUB);
+
+    u8g2Fonts.setBackgroundColor(GxEPD_RED);
+    u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+    const char* openaiTitle = "OpenAI · UTC";
+    u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(openaiTitle)) / 2,
+                       cardY + 14, openaiTitle);
+    u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
+    const char* deepseekTitle = "DeepSeek · Today";
+    u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(deepseekTitle)) / 2,
+                       cardY + 14, deepseekTitle);
+
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    if (openai_usage_status() == 1) {
+        OpenAIUsageData* usage = openai_usage_data();
+        u8g2Fonts.setFont(u8g2_font_fub17_tn);
+        snprintf(text, sizeof(text), "%u", usage->totalTokens);
+        u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
+                           cardY + 43, text);
+        u8g2Fonts.setFont(u8g2_font_6x10_tf);
+        snprintf(text, sizeof(text), "IN %u    OUT %u", usage->inputTokens, usage->outputTokens);
+        u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
+                           cardY + 60, text);
+        uint32_t total = usage->inputTokens + usage->outputTokens;
+        if (total > 0) {
+            int16_t inputW = (int16_t)((uint32_t)barW * usage->inputTokens / total);
+            int16_t outputW = barW - inputW;
+            if (inputW > 0) display.fillRect(openaiX + barMargin, cardY + 67, inputW, 8, GxEPD_RED);
+            if (outputW > 0) display.fillRect(openaiX + barMargin + inputW, cardY + 67, outputW, 8, GxEPD_BLACK);
+        } else {
+            display.drawRect(openaiX + barMargin, cardY + 67, barW, 8, GxEPD_BLACK);
+        }
+        snprintf(text, sizeof(text), "%s UTC", usage->dateUtc.c_str());
+        u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
+                           cardY + 91, text);
+    } else {
+        u8g2Fonts.setForegroundColor(GxEPD_RED);
+        u8g2Fonts.setFont(FONT_SUB);
+        const char* message = openai_usage_status() == 3 ? "Proxy not configured" : "Usage unavailable";
+        u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(message)) / 2,
+                           cardY + 57, message);
+        u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    }
+
+    if (deepseek_status() == 1) {
+        DeepSeekData* ds = deepseek_data();
+        uint32_t total = ds->tokensTodayFlash + ds->tokensTodayPro;
+        u8g2Fonts.setFont(u8g2_font_fub17_tn);
+        snprintf(text, sizeof(text), "%u", total);
+        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
+                           cardY + 43, text);
+        u8g2Fonts.setFont(u8g2_font_6x10_tf);
+        snprintf(text, sizeof(text), "FLASH %u    PRO %u", ds->tokensTodayFlash, ds->tokensTodayPro);
+        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
+                           cardY + 60, text);
+        if (total > 0) {
+            int16_t flashW = (int16_t)((uint32_t)barW * ds->tokensTodayFlash / total);
+            int16_t proW = barW - flashW;
+            if (flashW > 0) display.fillRect(deepseekX + barMargin, cardY + 67, flashW, 8, GxEPD_RED);
+            if (proW > 0) display.fillRect(deepseekX + barMargin + flashW, cardY + 67, proW, 8, GxEPD_BLACK);
+        } else {
+            display.drawRect(deepseekX + barMargin, cardY + 67, barW, 8, GxEPD_BLACK);
+        }
+        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width("RED FLASH / BLACK PRO")) / 2,
+                           cardY + 91, "RED FLASH / BLACK PRO");
+    } else {
+        u8g2Fonts.setForegroundColor(GxEPD_RED);
+        u8g2Fonts.setFont(FONT_SUB);
+        const char* message = deepseek_status() == 3 ? "Key not configured" : "Usage unavailable";
+        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(message)) / 2,
+                           cardY + 57, message);
+        u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     }
 }
 
@@ -1095,58 +1281,82 @@ void task_screen(void* param) {
     display.firstPage();
     display.fillScreen(GxEPD_WHITE);
     do {
-        // ★★★ 最小测试：只显示 DeepSeek 数据 ★★★
+#if 0 // 旧的 token-only 调试界面；保留以便排查显示问题。
+        // ===== 上半部分 (y=0~150)：红色背景 + 白字 =====
+        display.fillRect(0, 0, 400, 150, GxEPD_RED);
         u8g2Fonts.setFontMode(1);
         u8g2Fonts.setFontDirection(0);
+        u8g2Fonts.setBackgroundColor(GxEPD_RED);
+        u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+        u8g2Fonts.setFont(u8g2_font_fub25_tn);
+        u8g2Fonts.drawUTF8(80, 90, "日历区域");
+
+        // ===== 分隔线 =====
+        display.fillRect(0, 150, 400, 4, GxEPD_BLACK);
+
+        // ===== 下半部分 (y=154~300)：DeepSeek 数据 + 条形图 =====
         u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+        u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+
+        // 标题
+        u8g2Fonts.setFont(FONT_TEXT);
+        u8g2Fonts.drawUTF8(5, 172, "DeepSeek API 用量");
 
         if (deepseek_status() == 1) {
             DeepSeekData* ds = deepseek_data();
-            uint32_t totalToday = ds->tokensTodayFlash + ds->tokensTodayPro;
-            
-            // 标题
-            u8g2Fonts.setFont(FONT_TEXT);
-            u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-            u8g2Fonts.drawUTF8(10, 30, "DeepSeek 用量");
-            
-            // Flash token
+            uint32_t flashT = ds->tokensTodayFlash;
+            uint32_t proT   = ds->tokensTodayPro;
+            uint32_t maxV = max(flashT, proT);
+            if (maxV == 0) maxV = 1;
+
+            int barBaseY = 270;
+            int barH = 50;
+
+            // Flash 标签 + 数字
             u8g2Fonts.setFont(FONT_SUB);
             u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-            char buf[64];
-            snprintf(buf, sizeof(buf), "Flash: %ut", ds->tokensTodayFlash);
-            u8g2Fonts.drawUTF8(10, 60, buf);
-            
-            // Pro token
-            snprintf(buf, sizeof(buf), "Pro:   %ut", ds->tokensTodayPro);
-            u8g2Fonts.drawUTF8(10, 80, buf);
-            
-            // 今日合计（大红字）
-            u8g2Fonts.setFont(u8g2_font_fub25_tn);
-            u8g2Fonts.setForegroundColor(GxEPD_RED);
-            snprintf(buf, sizeof(buf), "%ut", totalToday);
-            u8g2Fonts.drawUTF8(10, 130, buf);
-            
+            char buf[40];
+            snprintf(buf, sizeof(buf), "Flash: %u tokens (%u次)", flashT, flashT/32+1);
+            u8g2Fonts.drawUTF8(5, 188, buf);
+
+            // Flash 条形图（红色）
+            int flashW = (int)((float)flashT / maxV * 350);
+            if (flashW < 10) flashW = 10;
+            display.fillRect(5, 195, flashW, 18, GxEPD_RED);
+            u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+            snprintf(buf, sizeof(buf), "%u", flashT);
+            u8g2Fonts.drawUTF8(10, 210, buf);
+
+            // Pro 标签 + 数字
+            u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+            snprintf(buf, sizeof(buf), "Pro:   %u tokens (%u次)", proT, proT/32+1);
+            u8g2Fonts.drawUTF8(5, 230, buf);
+
+            // Pro 条形图（黑色）
+            int proW = (int)((float)proT / maxV * 350);
+            if (proW < 10) proW = 10;
+            display.fillRect(5, 237, proW, 18, GxEPD_BLACK);
+            u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+            snprintf(buf, sizeof(buf), "%u", proT);
+            u8g2Fonts.drawUTF8(10, 252, buf);
+
             // 余额
-            u8g2Fonts.setFont(FONT_TEXT);
             u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-            String balStr = "余额: " + ds->currency + " " + ds->totalBalance;
-            u8g2Fonts.drawUTF8(10, 170, balStr.c_str());
-            
-            // 时间戳
             u8g2Fonts.setFont(FONT_SUB);
-            char timeBuf[32];
-            snprintf(timeBuf, sizeof(timeBuf), "更新: %d-%02d-%02d %02d:%02d",
-                tmInfo.tm_year + 1900, tmInfo.tm_mon + 1, tmInfo.tm_mday,
-                tmInfo.tm_hour, tmInfo.tm_min);
-            u8g2Fonts.drawUTF8(10, 280, timeBuf);
-            
-            Serial.println("[SCREEN] Token display rendered!");
+            snprintf(buf, sizeof(buf), "余额: %s %s", ds->currency.c_str(), ds->totalBalance.c_str());
+            u8g2Fonts.drawUTF8(5, 282, buf);
         } else {
             u8g2Fonts.setFont(FONT_TEXT);
             u8g2Fonts.setForegroundColor(GxEPD_RED);
-            u8g2Fonts.drawUTF8(10, 100, "DeepSeek 未配置");
-            Serial.printf("[SCREEN] No data, status=%d\r\n", deepseek_status());
+            u8g2Fonts.drawUTF8(10, 220, "未配置 DeepSeek Key");
         }
+
+#else
+        // 日历为主视图；Token/余额和电量显示在右上状态区。
+        display.fillScreen(GxEPD_WHITE);
+        draw_compact_calendar();
+        draw_deepseek_token_panel();
+#endif
     } while (display.nextPage());
 
     int32_t _calendar_date = (tmInfo.tm_year + 1900) * 10000 + (tmInfo.tm_mon + 1) * 100 + tmInfo.tm_mday;

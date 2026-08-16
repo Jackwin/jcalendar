@@ -1,249 +1,183 @@
 ---
-name: "jcalendar-ble-dev"
-description: "J-Calendar 项目开发指南：涵盖 BLE 数据推送、DeepSeek token 用量显示、GATT 服务设计、深睡眠低功耗、屏幕局部刷新等。当用户为 jcalendar 项目开发新功能或修改现有流程时调用。"
+name: jcalendar-ble-dev
+description: J-Calendar ESP32 墨水屏日历固件开发指南，涵盖 400x300 三色屏、农历与节气、OpenAI/DeepSeek Token 统计、安全代理、PlatformIO 编译烧录、BLE 和深度睡眠。用于修改、调试、构建或部署本项目时。
 ---
 
-# jcalendar-ble-dev
+# J-Calendar 固件开发
 
-为 J-Calendar（ESP32 墨水屏日历）的综合开发 skill，涵盖 **BLE 数据推送**、**DeepSeek token 用量显示**、屏幕刷新、低功耗管理等核心功能。
+## 工作原则
 
-## 何时调用本 Skill
+- 在 `D:\workspace\esp32\jcalendar` 内工作。
+- 修改前检查工作树，保留用户已有变更，不重置或覆盖无关文件。
+- 优先使用 `rg`、`rg --files` 定位实现。
+- 修改后执行与风险相称的构建或校验。
+- 未经用户明确要求，不改变已确认的显示布局、颜色和信息层级。
 
-- 用户要求为 jcalendar 新增 BLE 推送（天气、日历、倒数日、一言、配置等）功能
-- 用户要设计 BLE GATT 服务/特征、或定义手机与设备间的数据协议
-- 用户要解决 BLE 与现有深睡眠、Preferences、屏幕刷新流程的集成问题
-- 用户要加构建开关、新增 `ble.cpp/ble.h` 源文件，或调整 `platformio.ini`、`main.cpp` 数据流
-- 用户要修改 DeepSeek token 用量查询、显示逻辑、每小时刷新策略
-- 用户要添加或修改屏幕局部刷新（`si_screen_partial_status()`）、状态栏绘制（`draw_status()`）
-- 用户要调整深睡眠唤醒间隔策略（`go_sleep()`）
+## 当前产品基线
 
-## 项目背景与关键约束
+项目使用 ESP32 Arduino 和 PlatformIO。默认目标环境是 `z21`，其他硬件环境以 `platformio.ini` 为准。
 
-调用本 skill 前必须理解以下既有架构（勿破坏）：
+典型启动流程：
 
-- **平台**：ESP32 Arduino + PlatformIO，多环境（z21/z15/z98/1680/esp32c3），`SI_DRIVER` 宏区分屏幕驱动
-- **配置存储**：[include/_preference.h](file:///d:/workspace/esp32/jcalendar/include/_preference.h) 定义所有 NVS key，namespace=`J_CALENDAR`，key 限 15 字符
-- **既有数据流**（[src/main.cpp](file:///d:/workspace/esp32/jcalendar/src/main.cpp)）：
-  1. `wm.autoConnect()` 连 WiFi
-  2. `_sntp_exec()` 同步时间
-  3. `weather_exec()` 经 HTTP 拉取和风天气
-  4. `deepseek_exec()` 经 HTTP 调用 DeepSeek Chat + 余额 API
-  5. `_sntp_status()>0 && weather_status()>0 && deepseek_status()>0 && si_screen_status()==-1` 时调用 `si_screen()` 全屏刷新
-  6. 全屏刷新后记录 `FULL_DATE`（当日已全刷标记）
-  7. `go_sleep()` 进入深睡眠（按日/偶数小时/每小时唤醒，取决于配置）
-  8. **局部刷新路径**：若今日已全刷 + 定时器唤醒 → 仅 `deepseek_exec_balance_only()` → `si_screen_partial_status()` 局部刷新状态栏（无闪屏）
-- **数据结构**：[src/API.hpp](file:///d:/workspace/esp32/jcalendar/src/API.hpp) 定义 `Weather`/`DailyWeather`/`HourlyForecast`/`DailyForecast`/`Hitokoto`/`Bilibili`
-- **低功耗**：`go_sleep()` 关闭 WiFi、复位 SPI 引脚、关闭 RTC 存储域；BLE 必须遵循同样的省电纪律
-- **按键**：单击刷新、双击配置门户、长按清空 NVS 重启（[src/main.cpp](file:///d:/workspace/esp32/jcalendar/src/main.cpp) L216-329）
-- **引脚**（LOLIN32_LITE，[include/wiring.h](file:///d:/workspace/esp32/jcalendar/include/wiring.h)）：KEY_M=GPIO14（RTC 唤醒），未占用 BT 天线相关引脚，BLE 可用
+1. 初始化硬件和网络。
+2. 通过 SNTP 校时。
+3. 获取天气、OpenAI 用量和 DeepSeek 用量；各数据源独立容错。
+4. 一次性完成墨水屏全屏刷新。
+5. 释放网络、BLE 等资源后进入深度睡眠。
 
-## DeepSeek Token 用量每小时局部刷新（已实现）
+### 已确认的显示布局
 
-### 功能概述
-在电子墨水屏状态栏显示 DeepSeek API 的 **今日累计 token 用量** 和 **账户余额**。每日首次唤醒时调用 Chat API（生成"今日寄语"，消耗少量 token）+ 余额 API；之后每小时仅查余额 API（不消耗 token），使用 **局部刷新** 更新状态栏，**避免全屏闪屏**。
+这是用户认可的默认方案，除非用户明确要求，否则必须保留：
 
-### 涉及的源文件
+- 屏幕为 400 × 300 三色电子墨水屏。
+- `Y=0..189` 为日历区：月份、星期、阳历日期、农历、节气和节日。
+- 周末使用红色；当天使用红色圆角底色突出。
+- 节气和节日优先于普通农历日期显示。
+- `Y=190..299` 为 Token 区，左右两个简洁卡片。
+- 左侧 OpenAI：红色标题，显示 UTC 当日总量、输入、输出和日期。
+- 右侧 DeepSeek：黑色标题，显示当日总量、Flash 和 Pro。
+- 任一服务失败不得妨碍另一个服务或日历显示。
+- 数值为零时保持信息可读，进度条显示为空，不伪造占比。
 
-| 文件 | 职责 |
-|------|------|
-| [include/deepseek.h](file:///d:/workspace/esp32/jcalendar/include/deepseek.h) | `DeepSeekData` 结构体 + `deepseek_exec()` / `deepseek_exec_balance_only()` 声明 |
-| [src/deepseek.cpp](file:///d:/workspace/esp32/jcalendar/src/deepseek.cpp) | Chat API（`/chat/completions`）+ 余额 API（`/user/balance`）+ 今日 token 累计（NVS 持久化） |
-| [include/_preference.h](file:///d:/workspace/esp32/jcalendar/include/_preference.h) | `PREF_DS_KEY` / `PREF_DS_TODAY` / `PREF_DS_DATE` / `PREF_FULL_DATE` / `PREF_PARTIAL_CNT` |
-| [include/screen_ink.h](file:///d:/workspace/esp32/jcalendar/include/screen_ink.h) | `si_screen_partial_status()` 声明 |
-| [src/screen_ink.cpp](file:///d:/workspace/esp32/jcalendar/src/screen_ink.cpp) | `draw_status()` 渲染 token/余额/电池 + `si_screen_partial_status()` 局部刷新 + `task_screen()` 写入 `FULL_DATE` |
-| [src/main.cpp](file:///d:/workspace/esp32/jcalendar/src/main.cpp) | `loop()` 双路径（全刷 / 局部刷新）+ `go_sleep()` DS 模式下每小时唤醒 |
+显示相关实现主要位于 `src/screen_ink.cpp`：
 
-### 双路径数据流
+- `CALENDAR_PANEL_HEIGHT`
+- `compactLunarLabel`
+- `draw_compact_calendar`
+- `draw_deepseek_token_panel`（历史函数名，实际绘制双服务 Token 面板）
 
-```
-每日首次唤醒（全刷路径）:
-  WiFi → SNTP → weather_exec() → deepseek_exec() [Chat+余额]
-  → si_screen() 全屏刷新 → 记录 FULL_DATE → go_sleep(1小时)
+调整布局时先核对实际坐标、字体高度和卡片边界，避免文字重叠或三色屏残影。
 
-后续每小时唤醒（局部刷新路径）:
-  WiFi → SNTP → deepseek_exec_balance_only() [仅余额,不耗token]
-  → si_screen_partial_status() 局部刷新状态栏 → go_sleep(1小时)
+## 日历与农历
 
-每 24 次局部刷新 → 清除 FULL_DATE → 下次自动全刷（防残影）
-```
+- 使用项目已有 `si_calendar` 逻辑，不另引入大型日期库。
+- 关注 `nl_month_days`、`lunarDates[31]`、`nl_year_jq` 和 `jqAccDate`。
+- 日期数组按 `day - 1` 索引；闰月等特殊值保持现有符号约定。
+- 中文农历优先使用项目内最小可读中文字体（如 `wqy12`）。
+- 当前日历单元格高度约 24 px；阳历可使用约 11 px 字体，农历使用约 12 px 字体。
+- 同一天存在节气、节日和普通农历文本时，按产品现有优先级选择一个短标签，避免拥挤。
 
-### loop() 路径选择逻辑
+## OpenAI Token 用量
 
-```cpp
-// 判断条件：今日已全刷 且 定时器唤醒（非按键）
-bool todayFullDone = (pref.getString(PREF_FULL_DATE) == todayStr());
-esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+### 安全架构
 
-if (todayFullDone && wakeCause == ESP_SLEEP_WAKEUP_TIMER) {
-    // → 局部刷新路径：仅 DeepSeek 余额 + 状态栏局部刷新
-    deepseek_exec_balance_only();
-    si_screen_partial_status();
-} else {
-    // → 全刷路径：天气 + DeepSeek Chat/余额 + 全屏刷新
-    weather_exec();
-    deepseek_exec();
-    si_screen();
-}
+绝不把 OpenAI 组织管理员密钥写入 ESP32 固件、NVS、网页配置、日志或 Git 仓库。
+
+采用以下链路：
+
+```text
+ESP32 --HTTPS + 设备令牌--> Cloudflare Worker
+Worker --管理员密钥--> OpenAI Usage API
+Worker --精简 JSON--> ESP32
 ```
 
-### DeepSeek API 调用细节
+设备只持有可单独撤销的 `DEVICE_TOKEN`。代理负责保存管理员密钥、查询 UTC 当日数据、聚合输入和输出 Token，并返回固件所需的最小 JSON。
 
-| API | 端点 | 方法 | 频率 | 消耗 token |
-|-----|------|------|------|-----------|
-| Chat 补全 | `POST /chat/completions` | `callDeepSeekChat()` | 每日 1 次 | ✅ 是（~32 tokens） |
-| 账户余额 | `GET /user/balance` | `callDeepSeekBalance()` | 每小时 1 次 | ❌ 否 |
+相关文件通常包括：
 
-- **模型**：`deepseek-v4-flash`（便宜快速）
-- **今日寄语**：生成不超过 15 字，`max_tokens=32`
-- **今日累计 token**：通过 `addTodayTokens()` 累加，NVS 跨日自动重置（以 `todayStr()` YYYYMMDD 判断）
+- `include/openai_usage.h`
+- `src/openai_usage.cpp`
+- 私有配置示例头文件
+- `proxy/openai_usage_proxy.js`
+- `proxy/wrangler.toml` 或等价 Wrangler 配置
 
-### NVS Key 一览（DeepSeek 相关）
+实现要求：
 
-| Key | 类型 | 说明 |
-|-----|------|------|
-| `DS_KEY` | String | DeepSeek API Key（WiFiManager 配置） |
-| `DS_TOK_TODAY` | uint32 | 今日累计 token |
-| `DS_TOK_DATE` | String | 累计 token 对应日期 YYYYMMDD |
-| `FULL_DATE` | String | 今日是否已完成全屏刷新 YYYYMMDD |
-| `PARTIAL_CNT` | uint8 | 局部刷新计数（24 次上限） |
+- HTTPS 客户端使用 `setCACert` 校验证书，禁止 `setInsecure()`。
+- 私有配置文件加入 `.gitignore`；仅提交不含真实值的示例。
+- 缺少私有头文件时仍应能够编译，只把 OpenAI 数据标记为不可用。
+- “当日”统一按 UTC 统计，并在屏幕上明确标注 UTC，避免本地时区造成口径误解。
+- 不在串口输出密钥、完整授权头或包含密钥的 URL。
 
-### 局部刷新实现细节
+### Windows 部署代理
 
-```cpp
-void si_screen_partial_status() {
-    display.init(115200);           // 与全刷相同的初始化
-    display.setRotation(ROTATION);
-    u8g2Fonts.begin(display);
-    draw_status(true);              // partial=true，内部 setPartialWindow
-    display.powerOff();
-    display.hibernate();
-    // 更新 PARTIAL_CNT，>=24 时清除 FULL_DATE 强制下次全刷
-}
+在安装 Node.js 后，通过 PowerShell 执行：
+
+```powershell
+Set-Location D:\workspace\esp32\jcalendar\proxy
+npm init -y
+npm install --save-dev wrangler@latest
+npx.cmd wrangler login
+npx.cmd wrangler secret put OPENAI_ADMIN_KEY
+npx.cmd wrangler secret put DEVICE_TOKEN
+npx.cmd wrangler deploy
 ```
 
-- `draw_status(true)` 内部调用 `display.setPartialWindow(statusX, statusY, statusW, statusH)` 限定 14px 高度区域
-- 局部刷新仅重绘状态栏（DeepSeek token + 电池图标），日历/天气区域保持不变
-- **同步执行**（非 Task），因为局部刷新速度快（<500ms）
+将部署后的 Worker URL 和设备令牌写入本地私有配置，不提交真实值。更新 Secret 时再次执行 `wrangler secret put`，不要写入 `wrangler.toml`。
 
-### go_sleep() 唤醒策略
+## DeepSeek Token 用量
 
-| 条件 | 无 DS Key | 有 DS Key |
-|------|----------|----------|
-| 每日天气 / 无天气 | 次日唤醒 | **每小时唤醒** |
-| 实时天气（奇数小时） | 下个偶数小时 | **每小时唤醒** |
-| 实时天气（偶数小时） | 下个偶数小时 | **每小时唤醒** |
+- 保留项目已有 DeepSeek 请求与每日累计逻辑，相关实现以 `deepseek_exec` 和对应头文件为入口。
+- DeepSeek 与 OpenAI 同时启动并独立更新状态；一个请求失败不能清空另一个服务的有效结果。
+- `DEEPSEEK_API_KEY` 可来自被忽略的私有头文件，并优先于旧版 NVS `DS_KEY`。
+- 当日累计数据可保存在 NVS，但不得通过未认证的配置页面读出或写入真实 API 密钥。
+- 修改字段或模型拆分时同步检查显示层、JSON 解析和持久化结构。
 
-### 常见陷阱（DeepSeek 相关）
+## 密钥与配置约束
 
-- **Chat API 消耗 token**：`deepseek_exec()` 仅在每日首次全刷时调用，每小时路径只调 `deepseek_exec_balance_only()`
-- **局部刷新 ≠ 无限使用**：e-ink 局部刷新会积累残影，每 24 次（约 1 天）自动触发一次全刷
-- **`FULL_DATE` 跨日自动失效**：存储 YYYYMMDD 格式，次日 `todayFullDone` 为 false，自动走全刷路径
-- **局部刷新不可用于首次启动**：`FULL_DATE` 为空 → `todayFullDone` 为 false → 走全刷路径
-- **`deepseek_exec_balance_only()` 状态初始化**：必须先设 `_deepseek_status = 0`，防止 loop 重复调用
+- ESP32 NVS namespace 和 key 名长度受限；key 最长 15 个字符。
+- 未认证 HTTP 配置接口不得接收、回显或保存任何云服务密钥。
+- 示例文件使用清晰的占位符，禁止出现可用凭证。
+- 量产设备建议启用 Flash Encryption、Secure Boot，并为每台设备分配独立令牌。
+- 设备令牌泄露时应能只撤销该设备，不影响 OpenAI 管理员密钥。
 
----
+## PlatformIO 构建与烧录（Windows）
 
-## 目标架构：BLE 推送数据流
+若终端无法识别 `pio`，直接使用项目开发机上的完整路径：
 
-```
-手机（联网）──BLE GATT Write──> ESP32（免联网）
-                                 ├─ 解析 JSON/二进制
-                                 ├─ 存入 Preferences（复用/扩展 PREF_* key）
-                                 ├─ 标记数据新鲜 → 触发 si_screen()
-                                 └─ go_sleep()
+```powershell
+& 'C:\Users\rcwcj\.platformio\penv\Scripts\pio.exe' run -e z21 -j 1
 ```
 
-设备侧不再走 `weather_exec()`/`_sntp_exec()`，而是由 BLE 写入回调填充等价数据并推进状态机。
+烧录前连接开发板并在设备管理器确认串口，例如 `COM5`：
 
-## GATT 服务设计
-
-固定一个主服务，按数据域分特征。UUID 自行生成（16字节），以下为建议命名：
-
-| 特征           | UUID 末段 | 属性                   | 用途                                                             |
-| -------------- | --------- | ---------------------- | ---------------------------------------------------------------- |
-| Config         | `...-A1`  | Write                  | 下发 WiFi/QWeather/倒数日/Tag/课程表等配置（对应现有 PREF_*）    |
-| WeatherNow     | `...-A2`  | Write                  | 推送实时天气（`Weather` 结构）                                   |
-| ForecastDaily  | `...-A3`  | Write+WriteWithoutResp | 推送逐天预报（`DailyForecast`，较长，需分包）                    |
-| ForecastHourly | `...-A4`  | Write+WriteWithoutResp | 推送逐小时预报（`HourlyForecast`）                               |
-| Hitokoto       | `...-A5`  | Write                  | 推送一言                                                         |
-| Time           | `...-A6`  | Write                  | 下发当前时间（替代 SNTP，Unix 秒）                               |
-| Command        | `...-A7`  | Write                  | 指令：0x01 立即刷新屏幕、0x02 立即休眠、0x03 重启、0x04 清空配置 |
-| Status         | `...-A8`  | Read+Notify            | 设备状态：电量mV、屏幕类型、上次更新时间、BLE 连接状态           |
-
-## 分包协议（关键）
-
-BLE 单次 Write 默认 MTU 23（有效 20 字节），协商后可达 ~512。天气 JSON 远超此限，必须分包：
-
-- 方案 A（推荐，简单）：协商 MTU 后，单特征 `Write`（Long Write）最大 512 字节；预报数据拆成多次写，每次写一个 `DailyWeather` 或一组 `HourlyForecast` 元素，特征值末尾追加序号。
-- 方案 B（自定义帧）：每包 = `[1B type][2B seq][2B total][N B payload]`，接收端按 seq 缓冲、total 达成后拼装解析。type 复用上表特征编号。
-- 建议优先 JSON（与现有 `ArduinoJson` 一致），仅在 RAM 紧张时改二进制。
-
-## 与现有代码的集成规范
-
-### 1. 新增源文件
-- [src/ble.cpp](file:///d:/workspace/esp32/jcalendar/src/ble.cpp) / [include/ble.h](file:///d:/workspace/esp32/jcalendar/include/ble.h)：封装 BLE 初始化、广播、GATT 回调、状态机接口
-- 对外暴露与既有模块同风格的函数：`ble_init()`、`ble_exec()`、`ble_status()`、`ble_stop()`
-
-### 2. 构建开关
-在 [platformio.ini](file:///d:/workspace/esp32/jcalendar/platformio.ini) 各 env 的 `build_flags` 增加：
+```powershell
+& 'C:\Users\rcwcj\.platformio\penv\Scripts\pio.exe' run -e z21 -t upload --upload-port COM5
 ```
--D ENABLE_BLE
+
+查看串口日志：
+
+```powershell
+& 'C:\Users\rcwcj\.platformio\penv\Scripts\pio.exe' device monitor --port COM5 --baud 115200
 ```
-未定义时 BLE 代码用 `#ifdef ENABLE_BLE` 屏蔽，保持原有 WiFi 流程不变。
 
-### 3. main.cpp 数据流改造（条件分支）
-在 [src/main.cpp](file:///d:/workspace/esp32/jcalendar/src/main.cpp) `loop()` 中，`#ifdef ENABLE_BLE` 分支下：
-- 跳过 `_sntp_exec()`/`weather_exec()` 的 WiFi 路径
-- 改为 `ble_exec()` 处理已缓冲的 BLE 写入
-- 数据就绪后同样调用 `si_screen()`
-- `go_sleep()` 前必须 `BLEDevice::deinit()` 并复位蓝牙引脚（与现有 SPI 引脚复位一致）
+如果上传阶段一直等待连接：
 
-### 4. 数据落地到 NVS
-- 配置类写入复用 [include/_preference.h](file:///d:/workspace/esp32/jcalendar/include/_preference.h) 既有 key
-- 天气/一言等"易变数据"需新增 key（保持 ≤15 字符），例如：
-  - `W_NOW_JSON`、`W_DAILY_JSON`、`W_HOURLY_JSON`、`HITOKOTO`、`BLE_TIME`
-- 新增 key 必须追加到 [include/_preference.h](file:///d:/workspace/esp32/jcalendar/include/_preference.h) 并加注释
-- `weather.cpp`/`screen_ink.cpp` 读取数据的入口改为优先读 NVS 缓存（BLE 模式）再回退 HTTP（WiFi 模式）
+1. 按住开发板 `BOOT`。
+2. 短按 `EN/RESET`，或在开始连接时保持 `BOOT`。
+3. 看到写入进度后松开 `BOOT`。
+4. 烧录完成后按一次 `EN/RESET`。
 
-### 5. 时间同步替代
-BLE `Time` 特征下发 Unix 秒后，用 `settimeofday()` 设置系统时间，替代 SNTP；`_sntp_status()` 需在 BLE 模式下返回"已同步"。
+不要猜测串口号。先用以下命令确认：
 
-## 低功耗与深睡眠集成（必读）
+```powershell
+& 'C:\Users\rcwcj\.platformio\penv\Scripts\pio.exe' device list
+```
 
-- **BLE 不能跨深睡眠保持**：`go_sleep()` 前 `BLEDevice::deinit()`、`BLEDevice::deinit(false)` 释放内存；唤醒后重新 `ble_init()`
-- **广播窗口**：醒后仅广播短窗口（如 60s），超时无连接则直接 `si_screen()`+`go_sleep()`，避免空耗
-- **连接间隔**：作为 Peripheral，请求较大 connection interval（如 100~200ms）省电
-- **关闭未用域**：沿用 `go_sleep()` 的 `esp_sleep_pd_config(...)` 纪律
-- **RAM 预算**：BLE 协议栈约占 30~50KB RAM，注意与 `ArduinoJson` 解析缓冲共用时是否溢出；必要时缩小 `DailyForecast.length`
+## BLE 与内存
 
-## 实现步骤建议
+- BLE 功能保持在独立源文件中，并使用构建宏控制，避免不需要时增加固件体积和 RAM。
+- BLE 回调只解析、入队或更新状态，不在回调中刷新墨水屏或执行长时间网络请求。
+- 数据超过单包长度时使用明确的分片、序号、长度和校验规则。
+- 尽量复用已有数据结构和缓冲区，避免在 ESP32 上频繁分配大块堆内存。
+- 进入深度睡眠前停止广播、断开连接并释放 BLE/Wi-Fi 资源。
+- 每次引入 BLE、TLS、字体或大型 JSON 后检查 PlatformIO 报告的 RAM 与 Flash 占用。
 
-1. 在 [platformio.ini](file:///d:/workspace/esp32/jcalendar/platformio.ini) 增加 `-D ENABLE_BLE`，`lib_deps` 无需新增（Arduino-ESP32 自带 `BLEDevice.h`）
-2. 新建 [include/ble.h](file:///d:/workspace/esp32/jcalendar/include/ble.h) / [src/ble.cpp](file:///d:/workspace/esp32/jcalendar/src/ble.cpp)，实现 `ble_init/exec/status/stop` 与 GATT 回调骨架
-3. 在 [include/_preference.h](file:///d:/workspace/esp32/jcalendar/include/_preference.h) 追加天气缓存 key
-4. 用 `#ifdef ENABLE_BLE` 在 [src/main.cpp](file:///d:/workspace/esp32/jcalendar/src/main.cpp) `setup()`/`loop()`/`go_sleep()` 中插入 BLE 分支
-5. 实现 `Config` 特征写入 → 复用 `saveParamsCallback` 的存储逻辑
-6. 实现 `WeatherNow`/`ForecastDaily`/`Time` 写入 → 存 NVS → 推进状态机 → `si_screen()`
-7. 在 `go_sleep()` 加 `ble_stop()` + 引脚复位
-8. 用手机调试工具（nRF Connect / LightBlue）验证 GATT 与分包
+## 常用定位顺序
 
-## 常见陷阱
+1. 查看 `platformio.ini` 确认环境、宏和依赖。
+2. 查看 `src/main.cpp` 理解启动、联网、刷新和睡眠流程。
+3. 查看 `src/screen_ink.cpp` 与对应头文件处理布局。
+4. 查看 OpenAI、DeepSeek 和天气模块确认请求与状态边界。
+5. 查看 `.gitignore` 和私有配置示例，确认凭证不会进入版本控制。
+6. 修改后至少构建目标环境；涉及硬件交互时再烧录并检查串口日志。
 
-- **NVS key 超 15 字符**：[include/_preference.h](file:///d:/workspace/esp32/jcalendar/include/_preference.h) 顶部已警告，新增 key 务必检查
-- **BLE 写回调里直接刷新屏幕**：GATT 回调在协议栈线程，勿在其中直接调 `si_screen()`（耗时阻塞），应置标志位、在 `loop()` 执行
-- **深睡眠前未 deinit**：BLE 持续耗流数 mA，`go_sleep()` 必须先 `BLEDevice::deinit()`
-- **双击配置门户与 BLE 冲突**：WiFiManager 与 BLE 同时开可能增加功耗，建议 BLE 模式下双击改为进入 BLE 配置广播而非 WiFi 配置门户
-- **esp32c3 环境**：[platformio.ini](file:///d:/workspace/esp32/jcalendar/platformio.ini) `esp32c3` env 的 BLE API 与 ESP32 一致，但 flash 更小，注意分区表 `min_spiffs.csv` 是否够用
-- **`weather_status()` 返回值**：[src/main.cpp](file:///d:/workspace/esp32/jcalendar/src/main.cpp) L184 依赖 `>0` 才刷新屏幕，BLE 模式下需让该函数在收到 BLE 数据后返回正值
+## 完成检查
 
-## 参考文件索引
-
-- 主流程：[src/main.cpp](file:///d:/workspace/esp32/jcalendar/src/main.cpp)
-- 数据结构与 HTTP API：[src/API.hpp](file:///d:/workspace/esp32/jcalendar/src/API.hpp)
-- 配置 key：[include/_preference.h](file:///d:/workspace/esp32/jcalendar/include/_preference.h)
-- 引脚：[include/wiring.h](file:///d:/workspace/esp32/jcalendar/include/wiring.h)
-- 构建配置：[platformio.ini](file:///d:/workspace/esp32/jcalendar/platformio.ini)
-- 天气拉取：[src/weather.cpp](file:///d:/workspace/esp32/jcalendar/src/weather.cpp)
-- 屏幕刷新：[src/screen_ink.cpp](file:///d:/workspace/esp32/jcalendar/src/screen_ink.cpp) / [include/screen_ink.h](file:///d:/workspace/esp32/jcalendar/include/screen_ink.h)
-- SNTP：[src/_sntp.cpp](file:///d:/workspace/esp32/jcalendar/src/_sntp.cpp)
-- DeepSeek：[src/deepseek.cpp](file:///d:/workspace/esp32/jcalendar/src/deepseek.cpp) / [include/deepseek.h](file:///d:/workspace/esp32/jcalendar/include/deepseek.h)
+- 已保留用户确认的日历与双 Token 卡片布局。
+- 农历、节气、节日和当日高亮无重叠。
+- OpenAI 总量等于输入与输出的统计口径，日期标明 UTC。
+- DeepSeek 总量及 Flash/Pro 拆分可独立显示。
+- 任一 API 失败时页面仍完整，另一服务不受影响。
+- 固件和代理中没有真实管理员密钥，日志不泄露凭证。
+- `z21` 构建成功；需要烧录时确认了正确 COM 端口。
