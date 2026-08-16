@@ -4,6 +4,7 @@
 #include <weather.h>
 #include <API.hpp>
 #include <deepseek.h>
+#include <daily_brief.h>
 #include <openai_usage.h>
 #include "holiday.h"
 #include "nongli.h"
@@ -912,12 +913,54 @@ static String compactLunarLabel(int day) {
     return nl10_str[lunarDay / 10] + nl_str[lunarDay % 10];
 }
 
+static String clipUtf8ToWidth(String text, uint16_t maxWidth) {
+    while (text.length() > 0 && u8g2Fonts.getUTF8Width(text.c_str()) > maxWidth) {
+        size_t cut = text.length() - 1;
+        while (cut > 0 && (static_cast<uint8_t>(text.charAt(cut)) & 0xC0) == 0x80) --cut;
+        text.remove(cut);
+    }
+    return text;
+}
+
+static String compactWeatherText() {
+    if (weather_status() != 1) return "天气--";
+    if (weather_type() == 1) {
+        Weather* now = weather_data_now();
+        return now->text + " " + String(now->temp) + "°";
+    }
+    DailyForecast* forecast = weather_data_daily();
+    if (forecast->length == 0) return "天气--";
+    DailyWeather& today = forecast->weather[0];
+    return today.textDay + " " + String(today.tempMin) + "-" + String(today.tempMax) + "°";
+}
+
+static void draw_daily_brief() {
+    const DailyBrief brief = daily_brief_for_day(tmInfo.tm_yday);
+    u8g2Fonts.setFont(FONT_SUB);
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    const String weatherText = clipUtf8ToWidth(compactWeatherText(), 82);
+    u8g2Fonts.drawUTF8(3, 33, weatherText.c_str());
+
+    u8g2Fonts.setForegroundColor(GxEPD_RED);
+    const String todoText = clipUtf8ToWidth(String("• ") + brief.todo, 190);
+    u8g2Fonts.drawUTF8(88, 33, todoText.c_str());
+
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    String wordText = brief.word;
+    if (!brief.meaning.isEmpty()) wordText += "·" + brief.meaning;
+    wordText = clipUtf8ToWidth(wordText, 116);
+    const int16_t wordX = display.width() - 3 - u8g2Fonts.getUTF8Width(wordText.c_str());
+    u8g2Fonts.drawUTF8(wordX, 33, wordText.c_str());
+}
+
 // Compact calendar with Gregorian day and lunar/solar-term label in every cell.
 void draw_compact_calendar() {
     const int16_t calendarHeight = CALENDAR_PANEL_HEIGHT;
-    const int16_t monthY = 20;
-    const int16_t headerY = 28;
-    const int16_t daysY = 46;
+    const int16_t monthY = 17;
+    const int16_t headerY = 36;
+    const int16_t daysY = 53;
     const int16_t dayW = display.width() / 7;
     const int16_t dayH = (calendarHeight - daysY) / 6;
 
@@ -929,6 +972,8 @@ void draw_compact_calendar() {
     char month[16];
     snprintf(month, sizeof(month), "%04d-%02d", tmInfo.tm_year + 1900, tmInfo.tm_mon + 1);
     u8g2Fonts.drawUTF8((display.width() - u8g2Fonts.getUTF8Width(month)) / 2, monthY, month);
+
+    draw_daily_brief();
 
     u8g2Fonts.setFont(FONT_SUB);
     for (int column = 0; column < 7; ++column) {
@@ -963,7 +1008,7 @@ void draw_compact_calendar() {
         u8g2Fonts.setFont(u8g2_font_fub11_tn);
         String dayText = String(day);
         u8g2Fonts.drawUTF8(x + (dayW - u8g2Fonts.getUTF8Width(dayText.c_str())) / 2,
-                           y + 11, dayText.c_str());
+                            y + 10, dayText.c_str());
 
         String lunarText = compactLunarLabel(day);
         u8g2Fonts.setFont(FONT_SUB);

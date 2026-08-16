@@ -43,6 +43,21 @@ WiFiManagerParameter para_refresh_mode("refresh_mode", "刷新模式(0全刷/1LU
 #include <WebServer.h>
 WebServer configServer(80);
 
+static String htmlEscape(const String& value) {
+    String escaped;
+    escaped.reserve(value.length() + 16);
+    for (size_t i = 0; i < value.length(); ++i) {
+        switch (value.charAt(i)) {
+        case '&': escaped += "&amp;"; break;
+        case '<': escaped += "&lt;"; break;
+        case '>': escaped += "&gt;"; break;
+        case '"': escaped += "&quot;"; break;
+        default: escaped += value.charAt(i); break;
+        }
+    }
+    return escaped;
+}
+
 void print_wakeup_reason() {
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     switch (wakeup_reason) {
@@ -166,12 +181,38 @@ void loop() {
         // WiFi 连上后自动启动 Web 配置服务器
         if (!_webRunning) {
             configServer.on("/", [](){
+                Preferences pref;
+                pref.begin(PREF_NAMESPACE, true);
+                const String todoList = pref.getString(PREF_TODO_LIST, "");
+                const String wordList = pref.getString(PREF_WORD_LIST, "");
+                pref.end();
+
                 String html = "<html><meta charset='utf-8'><title>J-Calendar</title>";
-                html += "<style>body{font-size:1.2em;margin:20px}</style><body>";
+                html += "<style>body{font-size:1.1em;margin:20px;max-width:680px}textarea{width:100%;min-height:70px;font-size:1em}button{font-size:1em;padding:8px 16px}</style><body>";
                 html += "<h2>J-Calendar</h2>";
                 html += "<p>Cloud-service credentials are provisioned locally at build time and cannot be viewed or changed from this page.</p>";
+                html += "<h3>每日内容</h3><form action='/content' method='POST'>";
+                html += "<p>待办（用 | 分隔，屏幕每天轮换一项）</p><textarea name='todo' maxlength='360'>";
+                html += htmlEscape(todoList);
+                html += "</textarea><p>单词（用 | 分隔，每项格式：word=中文释义）</p><textarea name='words' maxlength='360'>";
+                html += htmlEscape(wordList);
+                html += "</textarea><p><button type='submit'>保存每日内容</button></p></form>";
                 html += "</body></html>";
                 configServer.send(200, "text/html", html);
+            });
+            configServer.on("/content", HTTP_POST, [](){
+                if (!configServer.hasArg("todo") || !configServer.hasArg("words")) {
+                    configServer.send(400, "text/plain", "Missing content fields");
+                    return;
+                }
+                Preferences pref;
+                pref.begin(PREF_NAMESPACE, false);
+                pref.putString(PREF_TODO_LIST, configServer.arg("todo").substring(0, 360));
+                pref.putString(PREF_WORD_LIST, configServer.arg("words").substring(0, 360));
+                pref.end();
+                configServer.send(200, "text/html", "<html><meta charset='utf-8'><body><h2>已保存</h2><p>设备将重启并更新每日内容。</p></body></html>");
+                delay(500);
+                ESP.restart();
             });
             configServer.begin();
             _webRunning = true;

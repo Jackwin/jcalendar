@@ -18,6 +18,8 @@
 #define PREF_CD_DAY_LABLE "CD_DAY_LABLE" // 倒计日名称
 #define PREF_TAG_DAYS "TAG_DAYS" // tag day
 #define PREF_STUDY_SCHEDULE "STUDY_SCH" // 课程表
+#define PREF_TODO_LIST "TODO_LIST" // pipe-separated short to-do items
+#define PREF_WORD_LIST "WORD_LIST" // pipe-separated word=meaning items
 
 // 假期信息，tm年，假期日(int8)，假期日(int8)...
 #define PREF_HOLIDAY "HOLIDAY"
