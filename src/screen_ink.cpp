@@ -934,33 +934,33 @@ static String compactWeatherText() {
     return today.textDay + " " + String(today.tempMin) + "-" + String(today.tempMax) + "°";
 }
 
-static void draw_daily_brief() {
+static void draw_daily_brief(int16_t baselineY) {
     const DailyBrief brief = daily_brief_for_day(tmInfo.tm_yday);
     u8g2Fonts.setFont(FONT_SUB);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
 
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     const String weatherText = clipUtf8ToWidth(compactWeatherText(), 82);
-    u8g2Fonts.drawUTF8(3, 33, weatherText.c_str());
+    u8g2Fonts.drawUTF8(3, baselineY, weatherText.c_str());
 
     u8g2Fonts.setForegroundColor(GxEPD_RED);
     const String todoText = clipUtf8ToWidth(String("• ") + brief.todo, 190);
-    u8g2Fonts.drawUTF8(88, 33, todoText.c_str());
+    u8g2Fonts.drawUTF8(88, baselineY, todoText.c_str());
 
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     String wordText = brief.word;
     if (!brief.meaning.isEmpty()) wordText += "·" + brief.meaning;
     wordText = clipUtf8ToWidth(wordText, 116);
     const int16_t wordX = display.width() - 3 - u8g2Fonts.getUTF8Width(wordText.c_str());
-    u8g2Fonts.drawUTF8(wordX, 33, wordText.c_str());
+    u8g2Fonts.drawUTF8(wordX, baselineY, wordText.c_str());
 }
 
 // Compact calendar with Gregorian day and lunar/solar-term label in every cell.
 void draw_compact_calendar() {
     const int16_t calendarHeight = CALENDAR_PANEL_HEIGHT;
-    const int16_t monthY = 17;
-    const int16_t headerY = 36;
-    const int16_t daysY = 53;
+    const int16_t monthY = 20;
+    const int16_t headerY = 28;
+    const int16_t daysY = 46;
     const int16_t dayW = display.width() / 7;
     const int16_t dayH = (calendarHeight - daysY) / 6;
 
@@ -972,8 +972,6 @@ void draw_compact_calendar() {
     char month[16];
     snprintf(month, sizeof(month), "%04d-%02d", tmInfo.tm_year + 1900, tmInfo.tm_mon + 1);
     u8g2Fonts.drawUTF8((display.width() - u8g2Fonts.getUTF8Width(month)) / 2, monthY, month);
-
-    draw_daily_brief();
 
     u8g2Fonts.setFont(FONT_SUB);
     for (int column = 0; column < 7; ++column) {
@@ -1008,7 +1006,7 @@ void draw_compact_calendar() {
         u8g2Fonts.setFont(u8g2_font_fub11_tn);
         String dayText = String(day);
         u8g2Fonts.drawUTF8(x + (dayW - u8g2Fonts.getUTF8Width(dayText.c_str())) / 2,
-                            y + 10, dayText.c_str());
+                            y + 11, dayText.c_str());
 
         String lunarText = compactLunarLabel(day);
         u8g2Fonts.setFont(FONT_SUB);
@@ -1022,19 +1020,22 @@ void draw_compact_calendar() {
 
 void draw_deepseek_token_panel() {
     const int16_t top = CALENDAR_PANEL_HEIGHT;
+    const int16_t briefH = 16;
     const int16_t margin = 4;
     const int16_t gap = 4;
     const int16_t cardW = (display.width() - margin * 2 - gap) / 2;
-    const int16_t cardH = display.height() - top - 5;
+    const int16_t cardH = display.height() - top - briefH - 5;
     const int16_t openaiX = margin;
     const int16_t deepseekX = margin + cardW + gap;
-    const int16_t cardY = top + 3;
-    const int16_t headerH = 19;
+    const int16_t cardY = top + briefH + 1;
+    const int16_t headerH = 16;
     const int16_t barMargin = 8;
     const int16_t barW = cardW - barMargin * 2;
     char text[64];
 
     display.drawFastHLine(0, top, display.width(), GxEPD_BLACK);
+    draw_daily_brief(top + 12);
+    display.drawFastHLine(0, top + briefH, display.width(), GxEPD_BLACK);
     display.drawRoundRect(openaiX, cardY, cardW, cardH, 4, GxEPD_RED);
     display.drawRoundRect(deepseekX, cardY, cardW, cardH, 4, GxEPD_BLACK);
     display.fillRoundRect(openaiX, cardY, cardW, headerH, 4, GxEPD_RED);
@@ -1047,11 +1048,11 @@ void draw_deepseek_token_panel() {
     u8g2Fonts.setForegroundColor(GxEPD_WHITE);
     const char* openaiTitle = "OpenAI · UTC";
     u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(openaiTitle)) / 2,
-                       cardY + 14, openaiTitle);
+                       cardY + 12, openaiTitle);
     u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
     const char* deepseekTitle = "DeepSeek · Today";
     u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(deepseekTitle)) / 2,
-                       cardY + 14, deepseekTitle);
+                       cardY + 12, deepseekTitle);
 
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
@@ -1060,29 +1061,29 @@ void draw_deepseek_token_panel() {
         u8g2Fonts.setFont(u8g2_font_fub17_tn);
         snprintf(text, sizeof(text), "%u", usage->totalTokens);
         u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 43, text);
+                           cardY + 39, text);
         u8g2Fonts.setFont(u8g2_font_6x10_tf);
         snprintf(text, sizeof(text), "IN %u    OUT %u", usage->inputTokens, usage->outputTokens);
         u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 60, text);
+                           cardY + 54, text);
         uint32_t total = usage->inputTokens + usage->outputTokens;
         if (total > 0) {
             int16_t inputW = (int16_t)((uint32_t)barW * usage->inputTokens / total);
             int16_t outputW = barW - inputW;
-            if (inputW > 0) display.fillRect(openaiX + barMargin, cardY + 67, inputW, 8, GxEPD_RED);
-            if (outputW > 0) display.fillRect(openaiX + barMargin + inputW, cardY + 67, outputW, 8, GxEPD_BLACK);
+            if (inputW > 0) display.fillRect(openaiX + barMargin, cardY + 59, inputW, 6, GxEPD_RED);
+            if (outputW > 0) display.fillRect(openaiX + barMargin + inputW, cardY + 59, outputW, 6, GxEPD_BLACK);
         } else {
-            display.drawRect(openaiX + barMargin, cardY + 67, barW, 8, GxEPD_BLACK);
+            display.drawRect(openaiX + barMargin, cardY + 59, barW, 6, GxEPD_BLACK);
         }
         snprintf(text, sizeof(text), "%s UTC", usage->dateUtc.c_str());
         u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 91, text);
+                           cardY + 80, text);
     } else {
         u8g2Fonts.setForegroundColor(GxEPD_RED);
         u8g2Fonts.setFont(FONT_SUB);
         const char* message = openai_usage_status() == 3 ? "Proxy not configured" : "Usage unavailable";
         u8g2Fonts.drawUTF8(openaiX + (cardW - u8g2Fonts.getUTF8Width(message)) / 2,
-                           cardY + 57, message);
+                           cardY + 51, message);
         u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     }
 
@@ -1092,27 +1093,27 @@ void draw_deepseek_token_panel() {
         u8g2Fonts.setFont(u8g2_font_fub17_tn);
         snprintf(text, sizeof(text), "%u", total);
         u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 43, text);
+                           cardY + 39, text);
         u8g2Fonts.setFont(u8g2_font_6x10_tf);
         snprintf(text, sizeof(text), "FLASH %u    PRO %u", ds->tokensTodayFlash, ds->tokensTodayPro);
         u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 60, text);
+                           cardY + 54, text);
         if (total > 0) {
             int16_t flashW = (int16_t)((uint32_t)barW * ds->tokensTodayFlash / total);
             int16_t proW = barW - flashW;
-            if (flashW > 0) display.fillRect(deepseekX + barMargin, cardY + 67, flashW, 8, GxEPD_RED);
-            if (proW > 0) display.fillRect(deepseekX + barMargin + flashW, cardY + 67, proW, 8, GxEPD_BLACK);
+            if (flashW > 0) display.fillRect(deepseekX + barMargin, cardY + 59, flashW, 6, GxEPD_RED);
+            if (proW > 0) display.fillRect(deepseekX + barMargin + flashW, cardY + 59, proW, 6, GxEPD_BLACK);
         } else {
-            display.drawRect(deepseekX + barMargin, cardY + 67, barW, 8, GxEPD_BLACK);
+            display.drawRect(deepseekX + barMargin, cardY + 59, barW, 6, GxEPD_BLACK);
         }
         u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width("RED FLASH / BLACK PRO")) / 2,
-                           cardY + 91, "RED FLASH / BLACK PRO");
+                           cardY + 80, "RED FLASH / BLACK PRO");
     } else {
         u8g2Fonts.setForegroundColor(GxEPD_RED);
         u8g2Fonts.setFont(FONT_SUB);
         const char* message = deepseek_status() == 3 ? "Key not configured" : "Usage unavailable";
         u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(message)) / 2,
-                           cardY + 57, message);
+                           cardY + 51, message);
         u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     }
 }
