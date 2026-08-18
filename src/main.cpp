@@ -184,6 +184,8 @@ void loop() {
                 pref.begin(PREF_NAMESPACE, true);
                 const String todoList = pref.getString(PREF_TODO_LIST, "");
                 const String wordList = pref.getString(PREF_WORD_LIST, "");
+                const String weatherHost = pref.getString(PREF_QWEATHER_HOST, "api.qweather.com");
+                const String weatherLocation = pref.getString(PREF_QWEATHER_LOC, "");
                 pref.end();
 
                 String html = "<html><meta charset='utf-8'><title>J-Calendar</title>";
@@ -197,7 +199,40 @@ void loop() {
                 html += htmlEscape(wordList);
                 html += "</textarea><p><button type='submit'>保存每日内容</button></p></form>";
                 html += "</body></html>";
+                html += "<hr><h3>Weather forecast</h3><form action='/weather' method='POST'>";
+                html += "<p>Service host</p><input name='host' maxlength='63' value='";
+                html += htmlEscape(weatherHost);
+                html += "'><p>API Key</p><input name='key' type='password' maxlength='127' placeholder='QWeather API Key'>";
+                html += "<p>Location ID</p><input name='location' maxlength='63' value='";
+                html += htmlEscape(weatherLocation);
+                html += "' placeholder='e.g. 101010100'><p><button type='submit'>Save weather settings</button></p></form>";
                 configServer.send(200, "text/html", html);
+            });
+            configServer.on("/weather", HTTP_POST, [](){
+                if (!configServer.hasArg("key") || !configServer.hasArg("location")) {
+                    configServer.send(400, "text/plain", "Missing weather settings");
+                    return;
+                }
+                const String key = configServer.arg("key");
+                const String location = configServer.arg("location");
+                if (key.isEmpty() || location.isEmpty()) {
+                    configServer.send(400, "text/plain", "API Key and Location ID are required");
+                    return;
+                }
+                String host = configServer.arg("host");
+                host.trim();
+                if (host.isEmpty()) host = "api.qweather.com";
+
+                Preferences pref;
+                pref.begin(PREF_NAMESPACE, false);
+                pref.putString(PREF_QWEATHER_HOST, host.substring(0, 63));
+                pref.putString(PREF_QWEATHER_KEY, key.substring(0, 127));
+                pref.putString(PREF_QWEATHER_LOC, location.substring(0, 63));
+                pref.putString(PREF_QWEATHER_TYPE, "0");
+                pref.end();
+                configServer.send(200, "text/html", "<html><meta charset='utf-8'><body><h2>Weather settings saved</h2><p>Restarting to fetch the forecast...</p></body></html>");
+                delay(500);
+                ESP.restart();
             });
             configServer.on("/content", HTTP_POST, [](){
                 if (!configServer.hasArg("todo") || !configServer.hasArg("words")) {

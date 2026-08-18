@@ -1063,8 +1063,84 @@ static void draw_weather_forecast_card(int16_t x, int16_t y, int16_t width, int1
     }
 }
 
+static void draw_weather_card_english(int16_t x, int16_t y, int16_t width, int16_t height) {
+    display.drawRoundRect(x, y, width, height, 4, GxEPD_BLACK);
+    display.fillRoundRect(x, y, width, 16, 4, GxEPD_BLACK);
+    u8g2Fonts.setFont(FONT_SUB);
+    u8g2Fonts.setBackgroundColor(GxEPD_BLACK);
+    u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+    const char* title = "WEATHER FORECAST";
+    u8g2Fonts.drawUTF8(x + (width - u8g2Fonts.getUTF8Width(title)) / 2, y + 12, title);
+
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    DailyForecast* forecast = weather_data_daily();
+    if (weather_status() != 1 || forecast->length == 0) {
+        u8g2Fonts.setForegroundColor(GxEPD_RED);
+        const char* message = weather_status() == 3 ? "NOT CONFIGURED" : "UNAVAILABLE";
+        u8g2Fonts.drawUTF8(x + (width - u8g2Fonts.getUTF8Width(message)) / 2, y + height / 2, message);
+        return;
+    }
+
+    const uint8_t days = forecast->length < 3 ? forecast->length : 3;
+    const int16_t columnW = width / days;
+    const char* labels[] = { "TODAY", "TOMORROW", "NEXT DAY" };
+    for (uint8_t day = 0; day < days; ++day) {
+        const DailyWeather& item = forecast->weather[day];
+        const int16_t centerX = x + day * columnW + columnW / 2;
+        u8g2Fonts.setForegroundColor(day == 0 ? GxEPD_RED : GxEPD_BLACK);
+        u8g2Fonts.setFont(u8g2_font_6x10_tf);
+        u8g2Fonts.drawUTF8(centerX - u8g2Fonts.getUTF8Width(labels[day]) / 2, y + 31, labels[day]);
+
+        u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+        u8g2Fonts.setFont(u8g2_font_fub17_tn);
+        char temperature[16];
+        snprintf(temperature, sizeof(temperature), "%d", item.tempMax);
+        u8g2Fonts.drawUTF8(centerX - u8g2Fonts.getUTF8Width(temperature) / 2, y + 58, temperature);
+        u8g2Fonts.setFont(u8g2_font_6x10_tf);
+        u8g2Fonts.drawUTF8(centerX + 10, y + 58, "C");
+
+        snprintf(temperature, sizeof(temperature), "LOW %dC", item.tempMin);
+        u8g2Fonts.drawUTF8(centerX - u8g2Fonts.getUTF8Width(temperature) / 2, y + 74, temperature);
+        char humidity[20];
+        snprintf(humidity, sizeof(humidity), "HUM %d%%", item.humidity);
+        u8g2Fonts.drawUTF8(centerX - u8g2Fonts.getUTF8Width(humidity) / 2, y + 90, humidity);
+        if (day + 1 < days) display.drawFastVLine(x + (day + 1) * columnW, y + 22, height - 28, GxEPD_BLACK);
+    }
+}
+
+static void draw_todo_card(int16_t x, int16_t y, int16_t width, int16_t height) {
+    const DailyBrief brief = daily_brief_for_day(tmInfo.tm_yday);
+    display.drawRoundRect(x, y, width, height, 4, GxEPD_BLACK);
+    display.fillRoundRect(x, y, width, 16, 4, GxEPD_RED);
+    u8g2Fonts.setBackgroundColor(GxEPD_RED);
+    u8g2Fonts.setForegroundColor(GxEPD_WHITE);
+    u8g2Fonts.setFont(FONT_SUB);
+    const char* title = "TODAY'S TODO";
+    u8g2Fonts.drawUTF8(x + 8, y + 12, title);
+
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    u8g2Fonts.setForegroundColor(GxEPD_RED);
+    u8g2Fonts.setFont(u8g2_font_fub17_tn);
+    u8g2Fonts.drawUTF8(x + 10, y + 44, "01");
+    display.drawFastVLine(x + 40, y + 26, height - 38, GxEPD_BLACK);
+
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    u8g2Fonts.setFont(FONT_TEXT);
+    const String todo = clipUtf8ToWidth(brief.todo, width - 56);
+    u8g2Fonts.drawUTF8(x + 50, y + 42, todo.c_str());
+    display.drawFastHLine(x + 10, y + 62, width - 20, GxEPD_BLACK);
+
+    u8g2Fonts.setFont(u8g2_font_6x10_tf);
+    const String word = "WORD  " + brief.word;
+    u8g2Fonts.drawUTF8(x + 10, y + 83, clipUtf8ToWidth(word, width - 20).c_str());
+    if (!brief.meaning.isEmpty()) {
+        u8g2Fonts.drawUTF8(x + 10, y + 101, clipUtf8ToWidth(brief.meaning, width - 20).c_str());
+    }
+}
+
 void draw_deepseek_token_panel() {
-    const int16_t top = CALENDAR_PANEL_HEIGHT;
+    // Dashboard mode uses the full screen below the compact daily briefing.
+    const int16_t top = 0;
     const int16_t briefH = 16;
     const int16_t margin = 4;
     const int16_t gap = 4;
@@ -1078,9 +1154,16 @@ void draw_deepseek_token_panel() {
     char text[64];
 
     display.drawFastHLine(0, top, display.width(), GxEPD_BLACK);
-    draw_daily_brief(top + 12);
+    u8g2Fonts.setFont(u8g2_font_6x10_tf);
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    snprintf(text, sizeof(text), "%04d-%02d-%02d  %02d:%02d", tmInfo.tm_year + 1900,
+             tmInfo.tm_mon + 1, tmInfo.tm_mday, tmInfo.tm_hour, tmInfo.tm_min);
+    u8g2Fonts.drawUTF8(5, top + 12, text);
     display.drawFastHLine(0, top + briefH, display.width(), GxEPD_BLACK);
-    draw_weather_forecast_card(margin, cardY, cardW, cardH);
+    const int16_t weatherH = 116;
+    draw_weather_card_english(margin, cardY, cardW, weatherH);
+    draw_todo_card(margin, cardY + weatherH + gap, cardW, cardH - weatherH - gap);
     display.drawRoundRect(deepseekX, cardY, cardW, cardH, 4, GxEPD_BLACK);
     display.fillRoundRect(deepseekX, cardY, cardW, headerH, 4, GxEPD_BLACK);
     u8g2Fonts.setFontMode(1);
@@ -1116,6 +1199,26 @@ void draw_deepseek_token_panel() {
         }
         u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width("RED FLASH / BLACK PRO")) / 2,
                            cardY + 80, "RED FLASH / BLACK PRO");
+
+        // Fill the lower part of the card with the account state and the
+        // latest short response, instead of leaving a large empty area.
+        display.drawFastHLine(deepseekX + 8, cardY + 96, cardW - 16, GxEPD_BLACK);
+        u8g2Fonts.setFont(FONT_SUB);
+        const String balance = ds->totalBalance.length() > 0
+            ? ds->currency + " " + ds->totalBalance
+            : "Balance unavailable";
+        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(balance.c_str())) / 2,
+                           cardY + 117, balance.c_str());
+
+        u8g2Fonts.setFont(u8g2_font_6x10_tf);
+        const String note = clipUtf8ToWidth(ds->content, cardW - 16);
+        if (!note.isEmpty()) {
+            u8g2Fonts.drawUTF8(deepseekX + 8, cardY + 141, note.c_str());
+        }
+
+        snprintf(text, sizeof(text), "UPDATED %02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
+        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
+                           cardY + cardH - 10, text);
     } else {
         u8g2Fonts.setForegroundColor(GxEPD_RED);
         u8g2Fonts.setFont(FONT_SUB);
@@ -1408,7 +1511,7 @@ void task_screen(void* param) {
 #else
         // 日历为主视图；Token/余额和电量显示在右上状态区。
         display.fillScreen(GxEPD_WHITE);
-        draw_compact_calendar();
+        // Calendar rendering is intentionally disabled in dashboard mode.
         draw_deepseek_token_panel();
 #endif
     } while (display.nextPage());
