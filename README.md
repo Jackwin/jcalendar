@@ -15,7 +15,19 @@ Token 面板顶部会显示当天的天气摘要、一个待办事项和一个�
 单词：focus=专注|learn=学习|calm=平静
 ```
 
-这里仅保存普通展示文本。OpenAI、DeepSeek 和天气服务的密钥不会显示、读取或写入该页面。
+每日内容区域仅保存普通展示文本；服务密钥不会在页面中回显。天气 JWT 私钥可通过设备本地配置页写入，之后留空提交即可保留原值。
+
+## 和风天气
+
+设备支持和风天气 API v7 的实时天气和三日预报，并使用 JWT 身份认证。请在和风天气控制台创建 JSON Web Token 凭据、上传 Ed25519 公钥，然后在设备本地配置页填写专属 API Host、凭据 ID（`kid`）、项目 ID（`sub`）、PKCS#8 PEM 私钥，以及 LocationID 或“经度,纬度”。Host 可直接粘贴完整的 `https://...` 地址，固件会自动提取域名。设备在 SNTP 校时后生成 15 分钟有效的 JWT，并通过 `Authorization: Bearer` 请求头发送；私钥和 JWT 不会写入请求 URL或串口日志。
+
+> 私钥会保存在设备 NVS 中，配置页不会回显，留空提交会保留原值。终端设备被读取或配置页面暴露时仍可能泄露私钥；高安全场景应按和风天气建议使用独立认证服务签发短期 Token，并启用 Flash Encryption、Secure Boot 或限制配置页访问。
+
+### BLE 配置
+
+按住设备按键唤醒并保持约 1.2 秒，会进入 10 分钟 BLE/Web 配置模式；也可以在启动后的短窗口内双击按键。串口会显示一次性 6 位 BLE 配对 PIN。在仓库根目录运行 `python -m http.server 8000 --directory tools`，再使用支持 Web Bluetooth 的 Chrome 或 Edge 打开 `http://localhost:8000/jcalendar-ble-config.html`。点击连接并在系统提示时输入该 PIN。BLE 使用加密配对，页面可读取 API Host、位置、天气类型、`kid` 和 `sub`，但不会读回 Wi-Fi 密码或 JWT 私钥；填写后保存会自动重启设备。
+
+> 和风天气从 2026 年起逐步停止旧的共享域名 `api.qweather.com`，请使用控制台提供的专属 API Host。
 
 ## Prepare & Meterial
 1. esp32开发板(建议lolin32 lite,其他esp32开发板亦可)<br>
@@ -87,7 +99,9 @@ Token 面板顶部会显示当天的天气摘要、一个待办事项和一个�
         * 0: 周日(默认); 1: 周一;
     * 和风天气:
         * 和风天气Host：输入在和风天气Host。（例如：******.re.qweatherapi.com, 具体值在自己的和风天气控制台可以查到<br>
-        * 输入和风天气的API Key：输入和风天气Key。（如果Key置空,天气将不会被刷新。）<br>
+        * JWT 凭据 ID：输入 JWT 凭据的 Credential ID（`kid`）。<br>
+        * JWT 项目 ID：输入凭据所属的 Project ID（`sub`）。<br>
+        * Ed25519 私钥：粘贴与控制台公钥对应的 PKCS#8 PEM 私钥；保存后页面不回显，后续留空可保留。<br>
         * 天气类型：0:每日天气（默认，每天凌晨刷新一次）; 1: 实时天气(每两个小时刷新一次天气)<br>
         * 位置ID：城市id或者经纬度 例1: 101010100 例2: 116.41,39.92 <br>
         [城市id列表](./assets/file/China-City-List-latest.csv) <br>
@@ -132,8 +146,8 @@ A: 1. 检查USB线连接是否正常。 <br>2. app的串口下拉框里是否检
 A: 1. 换根质量较好的或短一些的USB线，或换个USB口插入。 <br>2. 可以将刷新的波特率降低一点，如选择速率低一点的115200。
 7. Q: 刷新固件后，需要重新配置吗？<br>
 A: 仅刷新app固件后，配置是保留的，所以，无需重新配置。如果刷新了分区表partition.bin，会将esp的nvs区刷新，这时候需要重新配置。
-8. Q: 填入和风天气的API Key和位置ID后，没有成功获取天气信息。<br>
-A: 2025年3月1日后注册的和风天气账户有API Host限制，请下载1.0.25以后版本，在配置时配置API Host信息。
+8. Q: 填入和风天气 JWT 信息和位置ID后，没有成功获取天气信息。<br>
+A: 确认使用控制台专属 API Host，Credential ID 和 Project ID 未填反，公钥与设备中的 PKCS#8 私钥匹配，并检查设备是否已成功完成 SNTP 校时。接口返回 401 时可使用和风天气控制台的 JWT 验证工具排查。
 8. Q: 如何切换日历和课程表显示？<br>
 A: 在系统运行状态下(状态灯常亮)，单击按键，稍等即可切换课程表的展示。
 9. Q: 充一次电能使用多久？<br>

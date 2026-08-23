@@ -15,6 +15,7 @@
 #include "screen_ink.h"
 #include "_preference.h"
 #include "deepseek.h"
+#include "ble_config.h"
 
 #include "version.h"
 
@@ -27,7 +28,6 @@ void IRAM_ATTR checkTicks() {
 
 WiFiManager wm;
 WiFiManagerParameter para_qweather_host("qweather_host", "和风天气Host", "", 64); //     和风天气key
-WiFiManagerParameter para_qweather_key("qweather_key", "和风天气API Key", "", 32); //     和风天气key
 // const char* test_html = "<br/><label for='test'>天气模式</label><br/><input type='radio' name='test' value='0' checked> 每日天气test </input><input type='radio' name='test' value='1'> 实时天气test</input>";
 // WiFiManagerParameter para_test(test_html);
 WiFiManagerParameter para_qweather_type("qweather_type", "天气类型（0:每日天气，1:实时天气）", "0", 2, "pattern='\\[0-1]{1}'"); //     城市code
@@ -55,6 +55,37 @@ static String htmlEscape(const String& value) {
         }
     }
     return escaped;
+}
+
+static String normalizeQWeatherHost(String host) {
+    host.trim();
+    host.toLowerCase();
+    if (host.startsWith("https://")) host.remove(0, 8);
+    if (host.startsWith("http://")) host.remove(0, 7);
+    const int path = host.indexOf('/');
+    if (path >= 0) host.remove(path);
+    while (host.endsWith(".")) host.remove(host.length() - 1);
+    return host;
+}
+
+static bool isValidQWeatherHost(const String& host) {
+    if (host.isEmpty() || host.length() > 63 ||
+        !host.endsWith(".qweatherapi.com")) return false;
+    for (size_t i = 0; i < host.length(); ++i) {
+        const char c = host.charAt(i);
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-')) return false;
+    }
+    return true;
+}
+
+static bool isValidQWeatherIdentifier(const String& value) {
+    if (value.isEmpty() || value.length() > 63) return false;
+    for (size_t i = 0; i < value.length(); ++i) {
+        const char c = value.charAt(i);
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_')) return false;
+    }
+    return true;
 }
 
 void print_wakeup_reason() {
@@ -107,6 +138,14 @@ unsigned long _wifi_failed_millis;
 volatile bool _configRequested = false;
 bool _startWebOnConnect = false;
 bool _webRunning = false;
+constexpr unsigned long WEB_CONFIG_IDLE_TIMEOUT_MS = 10UL * 60UL * 1000UL;
+constexpr unsigned long BOOT_CONFIG_HOLD_MS = 1200;
+unsigned long _webLastActivity = 0;
+unsigned long _bootConfigDeadline = 0;
+
+static void noteWebActivity() {
+    _webLastActivity = millis();
+}
 void setup() {
     delay(10);
     Serial.begin(115200);
@@ -125,22 +164,43 @@ void setup() {
     delay(300);
     led_off();
 
-    // 按键：双击设置标志位，loop 中处理
+    // Holding the wake/config key is more reliable than trying to double-click
+    // inside a short boot window. A normal quick wake press does not enter config.
+    pinMode(KEY_M, INPUT_PULLUP);
+    if (digitalRead(KEY_M) == LOW) {
+        const unsigned long holdStarted = millis();
+        while (digitalRead(KEY_M) == LOW &&
+               millis() - holdStarted < BOOT_CONFIG_HOLD_MS) {
+            delay(10);
+        }
+        if (millis() - holdStarted >= BOOT_CONFIG_HOLD_MS) {
+            _startWebOnConnect = true;
+            Serial.println("=== BUTTON HELD - BLE configuration mode requested ===");
+        }
+    }
+
+    // 唤醒后的短窗口内双击，进入 Web + BLE 配置模式。
     button.setClickMs(300);
     button.setPressMs(3000);
     button.attachDoubleClick([]() {
-        Serial.println("=== DOUBLE CLICK - will open config portal ===");
-        Serial.println("Cloud-service credentials are local-only and cannot be changed from the web page.");
+        Serial.println("=== DOUBLE CLICK - configuration mode requested ===");
         _configRequested = true;
     });
     attachInterrupt(digitalPinToInterrupt(KEY_M), checkTicks, CHANGE);
+    _bootConfigDeadline = millis() + 1200;
 
-    Serial.println("Ready. Web config at http://J-Calendar.local (after WiFi)");
+    Serial.println("Config: hold the button while waking, then open the BLE config page.");
     Serial.println("------------------------------------------");
 }
 
 void loop() {
     button.tick();
+
+    // 避免主流程立即阻塞按键，给双击留下明确的配置入口。
+    if (_bootConfigDeadline != 0 && millis() < _bootConfigDeadline) {
+        delay(10);
+        return;
+    }
 
     // 持续处理 Web 请求（服务器在 WiFi 连接后启动）
     configServer.handleClient();
@@ -166,6 +226,8 @@ void loop() {
         return;
     }
     mainDone = true;
+    const bool configurationMode = _startWebOnConnect;
+    if (configurationMode) bleConfigStart();
 
     // 步骤1：连 WiFi
     Serial.println("Step 1: Connecting WiFi...");
@@ -177,64 +239,91 @@ void loop() {
     if (wm.autoConnect()) {
         Serial.println("WiFi OK!");
 
-        // WiFi 连上后自动启动 Web 配置服务器
-        if (!_webRunning) {
+        // Web 配置只在用户显式进入配置模式时开放。
+        if (configurationMode && !_webRunning) {
             configServer.on("/", [](){
+                noteWebActivity();
                 Preferences pref;
                 pref.begin(PREF_NAMESPACE, true);
                 const String todoList = pref.getString(PREF_TODO_LIST, "");
                 const String wordList = pref.getString(PREF_WORD_LIST, "");
-                const String weatherHost = pref.getString(PREF_QWEATHER_HOST, "api.qweather.com");
+                const String weatherHost = pref.getString(PREF_QWEATHER_HOST, "");
                 const String weatherLocation = pref.getString(PREF_QWEATHER_LOC, "");
+                const String weatherKid = pref.getString(PREF_QW_JWT_KID, "");
+                const String weatherSub = pref.getString(PREF_QW_JWT_SUB, "");
+                const String weatherType = pref.getString(PREF_QWEATHER_TYPE, "0");
                 pref.end();
 
                 String html = "<html><meta charset='utf-8'><title>J-Calendar</title>";
                 html += "<style>body{font-size:1.1em;margin:20px;max-width:680px}textarea{width:100%;min-height:70px;font-size:1em}button{font-size:1em;padding:8px 16px}</style><body>";
                 html += "<h2>J-Calendar</h2>";
-                html += "<p>Cloud-service credentials are provisioned locally at build time and cannot be viewed or changed from this page.</p>";
+                html += "<p>服务密钥不会在页面中回显；JWT 私钥留空时会保留原值。</p>";
                 html += "<h3>每日内容</h3><form action='/content' method='POST'>";
                 html += "<p>待办（用 | 分隔，屏幕每天轮换一项）</p><textarea name='todo' maxlength='360'>";
                 html += htmlEscape(todoList);
                 html += "</textarea><p>单词（用 | 分隔，每项格式：word=中文释义）</p><textarea name='words' maxlength='360'>";
                 html += htmlEscape(wordList);
                 html += "</textarea><p><button type='submit'>保存每日内容</button></p></form>";
-                html += "</body></html>";
-                html += "<hr><h3>Weather forecast</h3><form action='/weather' method='POST'>";
-                html += "<p>Service host</p><input name='host' maxlength='63' value='";
+                html += "<hr><h3>和风天气</h3><form action='/weather' method='POST'>";
+                html += "<p>API Host（和风天气控制台中的专属域名）</p><input name='host' maxlength='63' value='";
                 html += htmlEscape(weatherHost);
-                html += "'><p>API Key</p><input name='key' type='password' maxlength='127' placeholder='QWeather API Key'>";
-                html += "<p>Location ID</p><input name='location' maxlength='63' value='";
+                html += "' placeholder='abc123.def.qweatherapi.com'><p>JWT 凭据 ID（kid）</p><input name='kid' maxlength='63' value='";
+                html += htmlEscape(weatherKid);
+                html += "'><p>JWT 项目 ID（sub）</p><input name='sub' maxlength='63' value='";
+                html += htmlEscape(weatherSub);
+                html += "'><p>Ed25519 私钥（PKCS#8 PEM；留空则保留）</p><textarea name='private_key' maxlength='255' placeholder='-----BEGIN PRIVATE KEY----- ...'></textarea>";
+                html += "<p>位置 ID 或经度,纬度</p><input name='location' maxlength='63' value='";
                 html += htmlEscape(weatherLocation);
-                html += "' placeholder='e.g. 101010100'><p><button type='submit'>Save weather settings</button></p></form>";
+                html += "' placeholder='例如 101010100 或 116.41,39.92'>";
+                html += "<p>天气类型</p><select name='type'><option value='0'";
+                if (weatherType != "1") html += " selected";
+                html += ">每日天气</option><option value='1'";
+                if (weatherType == "1") html += " selected";
+                html += ">实时天气 + 三日预报</option></select>";
+                html += "<p><button type='submit'>保存天气设置</button></p></form></body></html>";
                 configServer.send(200, "text/html", html);
             });
             configServer.on("/weather", HTTP_POST, [](){
-                if (!configServer.hasArg("key") || !configServer.hasArg("location")) {
+                noteWebActivity();
+                if (!configServer.hasArg("location") || !configServer.hasArg("host")) {
                     configServer.send(400, "text/plain", "Missing weather settings");
                     return;
                 }
-                const String key = configServer.arg("key");
-                const String location = configServer.arg("location");
-                if (key.isEmpty() || location.isEmpty()) {
-                    configServer.send(400, "text/plain", "API Key and Location ID are required");
-                    return;
-                }
-                String host = configServer.arg("host");
-                host.trim();
-                if (host.isEmpty()) host = "api.qweather.com";
+                String privateKey = configServer.arg("private_key");
+                privateKey.trim();
+                String kid = configServer.arg("kid");
+                kid.trim();
+                String sub = configServer.arg("sub");
+                sub.trim();
+                String location = configServer.arg("location");
+                location.trim();
+                const String type = configServer.arg("type") == "1" ? "1" : "0";
+                const String host = normalizeQWeatherHost(configServer.arg("host"));
 
                 Preferences pref;
                 pref.begin(PREF_NAMESPACE, false);
+                if (privateKey.isEmpty()) privateKey = pref.getString(PREF_QW_JWT_PRIV, "");
+                if (!isValidQWeatherHost(host) || !isValidQWeatherIdentifier(kid) ||
+                    !isValidQWeatherIdentifier(sub) ||
+                    privateKey.isEmpty() || location.isEmpty()) {
+                    pref.end();
+                    configServer.send(400, "text/plain", "API Host, JWT credential ID, project ID, private key and location are required");
+                    return;
+                }
                 pref.putString(PREF_QWEATHER_HOST, host.substring(0, 63));
-                pref.putString(PREF_QWEATHER_KEY, key.substring(0, 127));
+                pref.putString(PREF_QW_JWT_KID, kid.substring(0, 63));
+                pref.putString(PREF_QW_JWT_SUB, sub.substring(0, 63));
+                pref.putString(PREF_QW_JWT_PRIV, privateKey.substring(0, 255));
                 pref.putString(PREF_QWEATHER_LOC, location.substring(0, 63));
-                pref.putString(PREF_QWEATHER_TYPE, "0");
+                pref.putString(PREF_QWEATHER_TYPE, type);
+                pref.remove("QWEATHER_KEY"); // Remove the legacy API-key setting.
                 pref.end();
                 configServer.send(200, "text/html", "<html><meta charset='utf-8'><body><h2>Weather settings saved</h2><p>Restarting to fetch the forecast...</p></body></html>");
                 delay(500);
                 ESP.restart();
             });
             configServer.on("/content", HTTP_POST, [](){
+                noteWebActivity();
                 if (!configServer.hasArg("todo") || !configServer.hasArg("words")) {
                     configServer.send(400, "text/plain", "Missing content fields");
                     return;
@@ -250,20 +339,28 @@ void loop() {
             });
             configServer.begin();
             _webRunning = true;
+            noteWebActivity();
             Serial.printf("=== Web: http://%s/ ===\r\n", WiFi.localIP().toString().c_str());
         }
 
+        if (!configurationMode) {
         // 步骤2：同步时间
         Serial.println("Step 2: Sync SNTP...");
         _sntp_exec();
-        while (_sntp_status() == 0) { delay(100); }
+        while (_sntp_status() == 0) {
+            configServer.handleClient();
+            delay(100);
+        }
         Serial.printf("SNTP status: %d\r\n", _sntp_status());
 
         // 步骤3：查天气预报和 DeepSeek；OpenAI 用量暂时屏蔽。
         Serial.println("Step 3: Query weather forecast & DeepSeek...");
         weather_exec();
         deepseek_exec();
-        while (weather_status() == 0 || deepseek_status() == 0) { delay(100); }
+        while (weather_status() == 0 || deepseek_status() == 0) {
+            configServer.handleClient();
+            delay(100);
+        }
         Serial.printf("Weather: %d  DeepSeek: %d\r\n", weather_status(), deepseek_status());
         if (deepseek_status() == 1) {
             DeepSeekData* ds = deepseek_data();
@@ -274,21 +371,33 @@ void loop() {
         // 步骤4：显示屏幕——强制全刷（调试用）
         Serial.println("Step 4: FULL screen refresh (forced)...");
         si_screen();
-        while (si_screen_status() == 0) { delay(100); }
+        while (si_screen_status() == 0) {
+            configServer.handleClient();
+            delay(100);
+        }
         Serial.printf("Screen status: %d\r\n", si_screen_status());
+        }
 
     } else {
         Serial.println("WiFi FAILED!");
     }
 
-    // 保持 WiFi + Web 30 秒方便配置
-    Serial.printf("=== Web: http://%s/ === (30s window)\r\n", WiFi.localIP().toString().c_str());
-    unsigned long webStart = millis();
-    while (millis() - webStart < 30000) {
+    // 配置模式保持到最后一次 Web 或 BLE 交互后的 10 分钟。
+    if (configurationMode) {
+        if (_webRunning) Serial.printf("=== Web: http://%s/ === (10 min idle timeout)\r\n", WiFi.localIP().toString().c_str());
+        noteWebActivity();
+    }
+    while (configurationMode && millis() - _webLastActivity < WEB_CONFIG_IDLE_TIMEOUT_MS) {
         configServer.handleClient();
+        if (bleConfigTakeActivity()) noteWebActivity();
+        if (bleConfigShouldRestart()) {
+            delay(500);
+            ESP.restart();
+        }
         delay(10);
     }
 
+    bleConfigStop();
     WiFi.mode(WIFI_OFF);
 
     // 计算下次唤醒时间：每小时整点
@@ -330,7 +439,6 @@ void saveParamsCallback() {
     Preferences pref;
     pref.begin(PREF_NAMESPACE);
     pref.putString(PREF_QWEATHER_HOST, para_qweather_host.getValue());
-    pref.putString(PREF_QWEATHER_KEY, para_qweather_key.getValue());
     pref.putString(PREF_QWEATHER_TYPE, strcmp(para_qweather_type.getValue(), "1") == 0 ? "1" : "0");
     pref.putString(PREF_QWEATHER_LOC, para_qweather_location.getValue());
     pref.putString(PREF_CD_DAY_LABLE, para_cd_day_label.getValue());
@@ -369,7 +477,6 @@ void buttonDoubleClick(void* oneButton) {
     Preferences pref;
     pref.begin(PREF_NAMESPACE);
     String qHost = pref.getString(PREF_QWEATHER_HOST);
-    String qToken = pref.getString(PREF_QWEATHER_KEY);
     String qType = pref.getString(PREF_QWEATHER_TYPE, "0");
     String qLoc = pref.getString(PREF_QWEATHER_LOC);
     String cddLabel = pref.getString(PREF_CD_DAY_LABLE);
@@ -381,7 +488,6 @@ void buttonDoubleClick(void* oneButton) {
     pref.end();
 
     para_qweather_host.setValue(qHost.c_str(), 64);
-    para_qweather_key.setValue(qToken.c_str(), 32);
     para_qweather_location.setValue(qLoc.c_str(), 64);
     para_qweather_type.setValue(qType.c_str(), 1);
     para_cd_day_label.setValue(cddLabel.c_str(), 16);
@@ -394,7 +500,6 @@ void buttonDoubleClick(void* oneButton) {
     wm.setTitle("J-Calendar");
     wm.addParameter(&para_si_week_1st);
     wm.addParameter(&para_qweather_host);
-    wm.addParameter(&para_qweather_key);
     wm.addParameter(&para_qweather_type);
     wm.addParameter(&para_qweather_location);
     wm.addParameter(&para_cd_day_label);
@@ -440,7 +545,12 @@ void go_sleep() {
     // 如果配置了 DeepSeek Key，则始终每小时刷新（方便查看 token 用量）
     Preferences pref;
     pref.begin(PREF_NAMESPACE);
-    String _qweather_key = pref.getString(PREF_QWEATHER_KEY, "");
+    const bool qweatherConfigured =
+        !pref.getString(PREF_QWEATHER_HOST, "").isEmpty() &&
+        !pref.getString(PREF_QW_JWT_KID, "").isEmpty() &&
+        !pref.getString(PREF_QW_JWT_SUB, "").isEmpty() &&
+        !pref.getString(PREF_QW_JWT_PRIV, "").isEmpty() &&
+        !pref.getString(PREF_QWEATHER_LOC, "").isEmpty();
     String _ds_key = pref.getString(PREF_DS_KEY, "");
     pref.end();
 
@@ -451,7 +561,7 @@ void go_sleep() {
 
     bool dsConfigured = (_ds_key.length() > 0);
 
-    if (_qweather_key.length() == 0 || weather_type() == 0) { // 没有配置天气或者使用按日天气，则第二天刷新。
+    if (!qweatherConfigured || weather_type() == 0) { // 没有配置天气或者使用按日天气，则第二天刷新。
         if (dsConfigured) {
             // DeepSeek 已配置：每小时唤醒一次更新 token 用量
             int secondsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec;

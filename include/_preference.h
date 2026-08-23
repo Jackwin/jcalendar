@@ -11,7 +11,9 @@
 #define PREF_SI_TYPE "SI_TYPE" // 屏幕显示类型
 
 #define PREF_QWEATHER_HOST "QWEATHER_HOST" // QWEATHER HOST
-#define PREF_QWEATHER_KEY "QWEATHER_KEY" // QWEATHER KEY/TOKEN
+#define PREF_QW_JWT_KID "QW_JWT_KID" // JWT Credential ID (kid)
+#define PREF_QW_JWT_SUB "QW_JWT_SUB" // JWT Project ID (sub)
+#define PREF_QW_JWT_PRIV "QW_JWT_PRIV" // Ed25519 PKCS#8 private key
 #define PREF_QWEATHER_TYPE "QWEATHER_TYPE" // 0: 每日天气，1: 实时天气
 #define PREF_QWEATHER_LOC "QWEATHER_LOC" // 地理位置
 #define PREF_CD_DAY_DATE "CD_DAY_DATE" // 倒计日

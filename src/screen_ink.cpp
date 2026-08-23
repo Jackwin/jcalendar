@@ -28,8 +28,11 @@ uint8_t _refresh_mode = 0;
 GxEPD2_DISPLAY_CLASS<GxEPD2_DRIVER_CLASS, GxEPD2_DRIVER_CLASS::HEIGHT> display(GxEPD2_DRIVER_CLASS(/*CS=D8*/ SPI_CS, /*DC=D3*/ SPI_DC, /*RST=D4*/ SPI_RST, /*BUSY=D2*/ SPI_BUSY));
 U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;
 
-#define FONT_TEXT u8g2_font_wqy16_t_gb2312 // 224825bytes，最大字库（天气描述中“霾”，只有此字库中有）
-#define FONT_SUB u8g2_font_wqy12_t_gb2312 // 次要字体，u8g2最小字体
+// Keep one complete GB2312 font instead of linking separate 12 px and 16 px
+// sets. The 13 px set still contains all 7539 glyphs (including “霾”) while
+// saving roughly 299 KB of flash and giving Chinese text a consistent weight.
+#define FONT_TEXT u8g2_font_wqy13_t_gb2312
+#define FONT_SUB FONT_TEXT
 const String week_str[] = { "日", "一", "二", "三", "四", "五", "六" };
 // const String tg_str[] = { "甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸" };            // 天干
 // const String dz_str[] = { "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥" }; // 地支

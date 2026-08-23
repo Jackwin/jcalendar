@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>J-Calendar BLE 配置</title>
+<style>body{font:16px system-ui;margin:20px;max-width:680px}input,textarea,select{box-sizing:border-box;width:100%;margin:4px 0 12px;padding:8px}textarea{height:110px}button{padding:9px 14px;margin:0 8px 12px 0}#log{white-space:pre-wrap;background:#f4f4f4;padding:10px;min-height:44px}</style>
+<h2>J-Calendar BLE 配置</h2>
+<p>按住设备按键唤醒并保持约 1.2 秒，看到配置指示后松开；也可以在启动后的短窗口内双击按键。</p>
+<p>串口会显示 6 位 BLE 配对 PIN。网页只通过蓝牙直连设备，不会上传配置。</p>
+<button id="connect">连接设备</button><button id="read" disabled>读取当前配置</button>
+<label>Wi-Fi SSID<input id="wifiSsid" maxlength="32"></label><label>Wi-Fi 密码（留空不改）<input id="wifiPassword" type="password" maxlength="63"></label>
+<hr><label>API Host<input id="host" maxlength="63"></label><label>位置<input id="location" maxlength="63" placeholder="101010100 或 116.41,39.92"></label>
+<label>天气类型<select id="type"><option value="0">每日天气</option><option value="1">实时天气 + 三日预报</option></select></label>
+<label>JWT Credential ID（kid）<input id="kid" maxlength="63"></label><label>JWT Project ID（sub）<input id="sub" maxlength="63"></label>
+<label>Ed25519 PKCS#8 PEM 私钥（留空不改）<textarea id="privateKey"></textarea></label><button id="save" disabled>保存并重启设备</button><div id="log">正在检查浏览器蓝牙支持…</div>
+<script>
+const serviceUuid='1d8b0c01-95b2-4fe8-b74d-8db8f9937e01',configUuid='1d8b0c02-95b2-4fe8-b74d-8db8f9937e01';let c,incoming=[];const $=id=>document.getElementById(id),log=s=>$('log').textContent=s,enc=new TextEncoder(),dec=new TextDecoder();
+async function send(o){const d=enc.encode(JSON.stringify(o));for(let i=0;i<d.length;i+=180){const p=d.slice(i,i+180),f=(i?0:1)|(i+p.length===d.length?2:0),x=new Uint8Array(p.length+2);x[0]=1;x[1]=f;x.set(p,2);await c.writeValueWithResponse(x)}}
+function received(e){try{const v=new Uint8Array(e.target.value.buffer),f=v[1];if(v[0]!==2)return;if(f&1)incoming=[];incoming.push(v.slice(2));if(!(f&2))return;const n=incoming.reduce((a,x)=>a+x.length,0),all=new Uint8Array(n);let p=0;incoming.forEach(x=>{all.set(x,p);p+=x.length});const r=JSON.parse(dec.decode(all));if(!r.ok){log('设备错误：'+r.error);return}if(r.op==='config'){['host','location','kid','sub','wifiSsid'].forEach(k=>$(k).value=r[k]||'');$('type').value=String(r.type||0);log('已读取当前配置。Wi-Fi 密码和JWT私钥不会从设备回传。')}else if(r.op==='saved')log('已保存，设备正在重启。')}catch(e){log('解析设备响应失败：'+e.message)}}
+$('connect').onclick=async()=>{try{if(!navigator.bluetooth)throw new Error('当前浏览器不支持 Web Bluetooth，请使用支持该功能的 Chrome 或 Edge');log('正在搜索配置服务，请确认设备已进入 BLE 配置模式…');const d=await navigator.bluetooth.requestDevice({filters:[{services:[serviceUuid]}],optionalServices:[serviceUuid]});d.addEventListener('gattserverdisconnected',()=>{c=undefined;$('read').disabled=$('save').disabled=true;log('设备已断开')});const g=await d.gatt.connect(),s=await g.getPrimaryService(serviceUuid);c=await s.getCharacteristic(configUuid);await c.startNotifications();c.addEventListener('characteristicvaluechanged',received);$('read').disabled=$('save').disabled=false;log('已连接：'+(d.name||'J-Calendar')+'；正在读取配置…');await send({op:'get'})}catch(e){log('连接失败：'+e.message)}};
+$('read').onclick=()=>send({op:'get'});$('save').onclick=()=>{const r={op:'set',host:$('host').value,location:$('location').value,type:+$('type').value,kid:$('kid').value,sub:$('sub').value};if($('privateKey').value.trim())r.privateKey=$('privateKey').value;if($('wifiSsid').value.trim()){r.wifiSsid=$('wifiSsid').value;r.wifiPassword=$('wifiPassword').value}send(r)};
+if(navigator.bluetooth){navigator.bluetooth.getAvailability().then(ok=>log(ok?'浏览器蓝牙可用。请先让设备进入配置模式，再点击“连接设备”。':'浏览器未检测到可用蓝牙，请检查系统蓝牙和浏览器权限。')).catch(e=>log('蓝牙检查失败：'+e.message))}else log('当前浏览器不支持 Web Bluetooth，请使用支持该功能的 Chrome 或 Edge。');
+</script>

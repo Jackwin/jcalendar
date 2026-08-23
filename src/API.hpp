@@ -77,6 +77,34 @@ private:
     HTTPClient http;
     WiFiClientSecure wifiClient;
 
+    static String urlEncode(const char* value) {
+        static const char hex[] = "0123456789ABCDEF";
+        String encoded;
+        if (value == nullptr) return encoded;
+        encoded.reserve(strlen(value) * 3);
+        while (*value) {
+            const uint8_t c = static_cast<uint8_t>(*value++);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                c == '.' || c == '~') {
+                encoded += static_cast<char>(c);
+            } else {
+                encoded += '%';
+                encoded += hex[c >> 4];
+                encoded += hex[c & 0x0f];
+            }
+        }
+        return encoded;
+    }
+
+    bool getQWeatherAPI(const String& path, const char* token, const char* locid, callback cb) {
+        const String url = path + "?location=" + urlEncode(locid) + "&lang=zh";
+        return getRestfulAPI(url, cb, [this, token]() {
+            // JWT authentication keeps credentials out of request URLs and logs.
+            http.addHeader("Authorization", String("Bearer ") + token);
+        });
+    }
+
     bool getRestfulAPI(String url, callback cb, precall pre = precall()) {
         // Serial.printf("Request Url: %s\n", url.c_str());
         JsonDocument doc;
@@ -166,10 +194,9 @@ public:
     }
 
     // 和风天气 - 实时天气: https://dev.qweather.com/docs/api/weather/weather-now/
-    bool getWeatherNow(Weather& result, const char* host, const char* key, const char* locid) {
-        // return getRestfulAPI("https://www.baidu.com", [&result](JsonDocument& json) {
-        return getRestfulAPI(
-            "https://" + String(host) + "/v7/weather/now?key=" + String(key) + "&location=" + String(locid), [&result](JsonDocument& json) {
+    bool getWeatherNow(Weather& result, const char* host, const char* token, const char* locid) {
+        return getQWeatherAPI(
+            "https://" + String(host) + "/v7/weather/now", token, locid, [&result](JsonDocument& json) {
                 if (strcmp(json["code"], "200") != 0) {
                     Serial.print(F("Get weather failed, error: "));
                     Serial.println(json["code"].as<const char*>());
@@ -191,8 +218,8 @@ public:
     }
 
     // 和风天气 - 逐小时天气预报: https://dev.qweather.com/docs/api/weather/weather-hourly-forecast/
-    bool getForecastHourly(HourlyForecast& result, const char* host, const char* key, const char* locid) {
-        return getRestfulAPI("https://" + String(host) + "/v7/weather/24h?key=" + String(key) + "&location=" + String(locid), [&result](JsonDocument& json) {
+    bool getForecastHourly(HourlyForecast& result, const char* host, const char* token, const char* locid) {
+        return getQWeatherAPI("https://" + String(host) + "/v7/weather/24h", token, locid, [&result](JsonDocument& json) {
             if (strcmp(json["code"], "200") != 0) {
                 Serial.print(F("Get hourly forecast failed, error: "));
                 Serial.println(json["code"].as<const char*>());
@@ -219,8 +246,8 @@ public:
     }
 
     // 和风天气 - 逐天天气预报: https://dev.qweather.com/docs/api/weather/weather-daily-forecast/
-    bool getForecastDaily(DailyForecast& result, const char* host, const char* key, const char* locid) {
-        return getRestfulAPI("https://" + String(host) + "/v7/weather/3d?key=" + String(key) + "&location=" + String(locid), [&result](JsonDocument& json) {
+    bool getForecastDaily(DailyForecast& result, const char* host, const char* token, const char* locid) {
+        return getQWeatherAPI("https://" + String(host) + "/v7/weather/3d", token, locid, [&result](JsonDocument& json) {
             if (strcmp(json["code"], "200") != 0) {
                 Serial.print(F("Get daily forecast failed, error: "));
                 Serial.println(json["code"].as<const char*>());
