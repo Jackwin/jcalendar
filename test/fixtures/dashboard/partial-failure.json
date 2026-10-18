@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-18T03:00:00Z",
+  "timezone": "Asia/Shanghai",
+  "local_date": "2026-10-18",
+  "weather": {"status":"error","source":"qweather","observed_at":null,"fetched_at":"2026-10-18T03:00:00Z","location_name":"北京","temp_c":null,"temp_min_c":null,"temp_max_c":null,"condition":"","condition_code":""},
+  "usage": [
+    {"provider":"openai","status":"ok","source":"provider_api","coverage":"project","completeness":"partial","window_start":"2026-10-17T16:00:00Z","window_end":"2026-10-18T03:00:00Z","fetched_at":"2026-10-18T03:00:00Z","observed_at":null,"input_tokens":120,"output_tokens":30,"total_tokens":150,"balance":null},
+    {"provider":"deepseek","status":"error","source":"gateway_ledger","coverage":"gateway_only","completeness":"unknown","window_start":"2026-10-17T16:00:00Z","window_end":"2026-10-18T03:00:00Z","fetched_at":"2026-10-18T03:00:00Z","observed_at":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"balance":{"status":"error","currency":"","amount":"","fetched_at":"2026-10-18T03:00:00Z"}}
+  ],
+  "focus": {"type":"manual","text":"整理桌面"},
+  "refresh_after_seconds": 7200
+}
