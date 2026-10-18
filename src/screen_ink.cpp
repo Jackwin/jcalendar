@@ -831,11 +831,12 @@ void draw_status(bool partial) {
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
 
-    // DeepSeek 今日token用量 + 账户余额（电池图标左侧）
+    // DeepSeek balance only. Token usage remains explicitly unsupported until
+    // a real gateway ledger is configured.
     Serial.printf("[draw_status] deepseek_status=%d\r\n", deepseek_status());
     if (deepseek_status() == 1) {
         DeepSeekData* ds = deepseek_data();
-        String text = String(ds->tokensTodayFlash + ds->tokensTodayPro) + "t ";
+        String text = "DS ";
         if (ds->totalBalance.length() > 0) {
             String curSym = (ds->currency == "USD") ? "$" : "¥";
             text += curSym + ds->totalBalance;
@@ -1149,8 +1150,6 @@ void draw_deepseek_token_panel() {
     const int16_t deepseekX = margin + cardW + gap;
     const int16_t cardY = top + briefH + 1;
     const int16_t headerH = 16;
-    const int16_t barMargin = 8;
-    const int16_t barW = cardW - barMargin * 2;
     char text[64];
 
     display.drawFastHLine(0, top, display.width(), GxEPD_BLACK);
@@ -1178,53 +1177,31 @@ void draw_deepseek_token_panel() {
 
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-    if (deepseek_status() == 1) {
-        DeepSeekData* ds = deepseek_data();
-        uint32_t total = ds->tokensTodayFlash + ds->tokensTodayPro;
-        u8g2Fonts.setFont(u8g2_font_fub17_tn);
-        snprintf(text, sizeof(text), "%u", total);
-        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 39, text);
-        u8g2Fonts.setFont(u8g2_font_6x10_tf);
-        snprintf(text, sizeof(text), "FLASH %u    PRO %u", ds->tokensTodayFlash, ds->tokensTodayPro);
-        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
-                           cardY + 54, text);
-        if (total > 0) {
-            int16_t flashW = (int16_t)((uint32_t)barW * ds->tokensTodayFlash / total);
-            int16_t proW = barW - flashW;
-            if (flashW > 0) display.fillRect(deepseekX + barMargin, cardY + 59, flashW, 6, GxEPD_RED);
-            if (proW > 0) display.fillRect(deepseekX + barMargin + flashW, cardY + 59, proW, 6, GxEPD_BLACK);
-        } else {
-            display.drawRect(deepseekX + barMargin, cardY + 59, barW, 6, GxEPD_BLACK);
-        }
-        u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width("RED FLASH / BLACK PRO")) / 2,
-                           cardY + 80, "RED FLASH / BLACK PRO");
+    DeepSeekData* ds = deepseek_data();
+    u8g2Fonts.setFont(FONT_SUB);
+    const char* usageMessage = ds->usageStatus == DEEPSEEK_UNSUPPORTED
+        ? "Token not connected" : "Token unavailable";
+    u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(usageMessage)) / 2,
+                       cardY + 48, usageMessage);
+    display.drawFastHLine(deepseekX + 8, cardY + 64, cardW - 16, GxEPD_BLACK);
 
-        // Fill the lower part of the card with the account state and the
-        // latest short response, instead of leaving a large empty area.
-        display.drawFastHLine(deepseekX + 8, cardY + 96, cardW - 16, GxEPD_BLACK);
-        u8g2Fonts.setFont(FONT_SUB);
+    if (ds->balanceStatus == DEEPSEEK_OK) {
         const String balance = ds->totalBalance.length() > 0
             ? ds->currency + " " + ds->totalBalance
             : "Balance unavailable";
         u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(balance.c_str())) / 2,
-                           cardY + 117, balance.c_str());
+                           cardY + 88, balance.c_str());
 
         u8g2Fonts.setFont(u8g2_font_6x10_tf);
-        const String note = clipUtf8ToWidth(ds->content, cardW - 16);
-        if (!note.isEmpty()) {
-            u8g2Fonts.drawUTF8(deepseekX + 8, cardY + 141, note.c_str());
-        }
-
         snprintf(text, sizeof(text), "UPDATED %02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
         u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(text)) / 2,
                            cardY + cardH - 10, text);
     } else {
         u8g2Fonts.setForegroundColor(GxEPD_RED);
-        u8g2Fonts.setFont(FONT_SUB);
-        const char* message = deepseek_status() == 3 ? "Key not configured" : "Usage unavailable";
+        const char* message = ds->balanceStatus == DEEPSEEK_NOT_CONFIGURED
+            ? "Balance not configured" : "Balance unavailable";
         u8g2Fonts.drawUTF8(deepseekX + (cardW - u8g2Fonts.getUTF8Width(message)) / 2,
-                           cardY + 51, message);
+                           cardY + 88, message);
         u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     }
 }
@@ -1438,82 +1415,8 @@ void task_screen(void* param) {
     display.firstPage();
     display.fillScreen(GxEPD_WHITE);
     do {
-#if 0 // 旧的 token-only 调试界面；保留以便排查显示问题。
-        // ===== 上半部分 (y=0~150)：红色背景 + 白字 =====
-        display.fillRect(0, 0, 400, 150, GxEPD_RED);
-        u8g2Fonts.setFontMode(1);
-        u8g2Fonts.setFontDirection(0);
-        u8g2Fonts.setBackgroundColor(GxEPD_RED);
-        u8g2Fonts.setForegroundColor(GxEPD_WHITE);
-        u8g2Fonts.setFont(u8g2_font_fub25_tn);
-        u8g2Fonts.drawUTF8(80, 90, "日历区域");
-
-        // ===== 分隔线 =====
-        display.fillRect(0, 150, 400, 4, GxEPD_BLACK);
-
-        // ===== 下半部分 (y=154~300)：DeepSeek 数据 + 条形图 =====
-        u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
-        u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-
-        // 标题
-        u8g2Fonts.setFont(FONT_TEXT);
-        u8g2Fonts.drawUTF8(5, 172, "DeepSeek API 用量");
-
-        if (deepseek_status() == 1) {
-            DeepSeekData* ds = deepseek_data();
-            uint32_t flashT = ds->tokensTodayFlash;
-            uint32_t proT   = ds->tokensTodayPro;
-            uint32_t maxV = max(flashT, proT);
-            if (maxV == 0) maxV = 1;
-
-            int barBaseY = 270;
-            int barH = 50;
-
-            // Flash 标签 + 数字
-            u8g2Fonts.setFont(FONT_SUB);
-            u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-            char buf[40];
-            snprintf(buf, sizeof(buf), "Flash: %u tokens (%u次)", flashT, flashT/32+1);
-            u8g2Fonts.drawUTF8(5, 188, buf);
-
-            // Flash 条形图（红色）
-            int flashW = (int)((float)flashT / maxV * 350);
-            if (flashW < 10) flashW = 10;
-            display.fillRect(5, 195, flashW, 18, GxEPD_RED);
-            u8g2Fonts.setForegroundColor(GxEPD_WHITE);
-            snprintf(buf, sizeof(buf), "%u", flashT);
-            u8g2Fonts.drawUTF8(10, 210, buf);
-
-            // Pro 标签 + 数字
-            u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-            snprintf(buf, sizeof(buf), "Pro:   %u tokens (%u次)", proT, proT/32+1);
-            u8g2Fonts.drawUTF8(5, 230, buf);
-
-            // Pro 条形图（黑色）
-            int proW = (int)((float)proT / maxV * 350);
-            if (proW < 10) proW = 10;
-            display.fillRect(5, 237, proW, 18, GxEPD_BLACK);
-            u8g2Fonts.setForegroundColor(GxEPD_WHITE);
-            snprintf(buf, sizeof(buf), "%u", proT);
-            u8g2Fonts.drawUTF8(10, 252, buf);
-
-            // 余额
-            u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-            u8g2Fonts.setFont(FONT_SUB);
-            snprintf(buf, sizeof(buf), "余额: %s %s", ds->currency.c_str(), ds->totalBalance.c_str());
-            u8g2Fonts.drawUTF8(5, 282, buf);
-        } else {
-            u8g2Fonts.setFont(FONT_TEXT);
-            u8g2Fonts.setForegroundColor(GxEPD_RED);
-            u8g2Fonts.drawUTF8(10, 220, "未配置 DeepSeek Key");
-        }
-
-#else
-        // 日历为主视图；Token/余额和电量显示在右上状态区。
         display.fillScreen(GxEPD_WHITE);
-        // Calendar rendering is intentionally disabled in dashboard mode.
         draw_deepseek_token_panel();
-#endif
     } while (display.nextPage());
 
     int32_t _calendar_date = (tmInfo.tm_year + 1900) * 10000 + (tmInfo.tm_mon + 1) * 100 + tmInfo.tm_mday;

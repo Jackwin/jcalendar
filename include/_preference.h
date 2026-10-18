@@ -26,9 +26,11 @@
 
 // DeepSeek（显示 token 用量 / 账户余额）
 #define PREF_DS_KEY "DS_KEY"         // DeepSeek API Key
-#define PREF_DS_TODAY_FLASH "DS_TOK_FLASH" // flash 今日累计 token
-#define PREF_DS_TODAY_PRO "DS_TOK_PRO"   // pro 今日累计 token
-#define PREF_DS_DATE "DS_TOK_DATE"   // 今日累计 token 对应的日期 YYYYMMDD
+// Deprecated: values created by the old auto-prompt implementation are not
+// account-wide usage and must never be migrated into dashboard usage.
+#define PREF_DS_TODAY_FLASH "DS_TOK_FLASH"
+#define PREF_DS_TODAY_PRO "DS_TOK_PRO"
+#define PREF_DS_DATE "DS_TOK_DATE"
 
 // 屏幕刷新模式：0=全刷（默认，闪屏），1=LUT差分刷新（无闪屏，快速）
 #define PREF_REFRESH_MODE "REFRESH_MODE"

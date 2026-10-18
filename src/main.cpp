@@ -259,16 +259,16 @@ void loop() {
         while (_sntp_status() == 0) { delay(100); }
         Serial.printf("SNTP status: %d\r\n", _sntp_status());
 
-        // 步骤3：查天气预报和 DeepSeek；OpenAI 用量暂时屏蔽。
-        Serial.println("Step 3: Query weather forecast & DeepSeek...");
+        // 步骤3：查天气预报和 DeepSeek 余额；不调用模型生成内容。
+        Serial.println("Step 3: Query weather forecast & DeepSeek balance...");
         weather_exec();
         deepseek_exec();
         while (weather_status() == 0 || deepseek_status() == 0) { delay(100); }
         Serial.printf("Weather: %d  DeepSeek: %d\r\n", weather_status(), deepseek_status());
         if (deepseek_status() == 1) {
             DeepSeekData* ds = deepseek_data();
-            Serial.printf("DeepSeek: Flash=%u Pro=%u\r\n",
-                          ds->tokensTodayFlash, ds->tokensTodayPro);
+            Serial.printf("DeepSeek usage status=%d, balance=%s %s\r\n",
+                          ds->usageStatus, ds->currency.c_str(), ds->totalBalance.c_str());
         }
 
         // 步骤4：显示屏幕——强制全刷（调试用）
