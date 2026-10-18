@@ -76,7 +76,7 @@ String usageValue(const UsageData* usage) {
     if (usage == nullptr || usage->status == Status::NotConfigured || usage->status == Status::Unsupported) {
         return "未接入";
     }
-    if (!usage->totalTokens.hasValue) return "未知";
+    if (!usage->totalTokens.hasValue) return usage->status == Status::Error ? "获取失败" : "未知";
     return formatTokenCount(usage->totalTokens.value);
 }
 
@@ -89,10 +89,16 @@ String usageScopeLabel(const UsageData* usage) {
 }
 
 String snapshotStateLabel(const Snapshot& snapshot, bool offline) {
+    if (snapshot.focus.type == "connection_error") {
+        return snapshot.weather.status == Status::NotConfigured ? "等待配置数据源" : "数据源连接失败";
+    }
     if (offline) return "离线 · 保留缓存";
     if (snapshot.weather.status == Status::Stale) return "天气数据有延迟";
     if (snapshot.weather.status == Status::Error) return "天气获取失败";
+    if (snapshot.weather.status == Status::NotConfigured) return "请双击配置和风天气";
     for (uint8_t i = 0; i < snapshot.usageCount; ++i) {
+        if (snapshot.usage[i].balance.status == Status::Error) return "余额获取失败";
+        if (snapshot.usage[i].balance.status == Status::NotConfigured) return "请双击配置 DeepSeek";
         if (snapshot.usage[i].status == Status::Stale) return "用量数据有延迟";
         if (snapshot.usage[i].status == Status::Error) return "部分数据失败";
     }

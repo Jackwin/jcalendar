@@ -3,6 +3,7 @@
 #include <FS.h>
 #include <SPIFFS.h>
 #include <memory>
+#include "esp_partition.h"
 
 #include "dashboard_client.h"
 
@@ -30,6 +31,23 @@ struct SlotData {
 };
 
 bool mounted = false;
+bool mountAttempted = false;
+
+bool cachePartitionIsErased() {
+    const esp_partition_t* partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+    if (partition == nullptr) return false;
+    uint8_t buffer[256];
+    for (size_t offset = 0; offset < partition->size; offset += sizeof(buffer)) {
+        const size_t remaining = partition->size - offset;
+        const size_t length = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        if (esp_partition_read(partition, offset, buffer, length) != ESP_OK) return false;
+        for (size_t i = 0; i < length; ++i) {
+            if (buffer[i] != 0xff) return false;
+        }
+    }
+    return true;
+}
 
 uint32_t crc32(const uint8_t* data, size_t length) {
     uint32_t crc = 0xffffffffUL;
@@ -103,7 +121,17 @@ bool writeSlot(const char* path, const char* json, size_t length, uint32_t seque
 
 bool dashboard_cache_begin() {
     if (mounted) return true;
-    // Never auto-format here: a mount failure must not destroy the last cache.
+    if (mountAttempted) return false;
+    mountAttempted = true;
+    // Initialize only a completely erased partition. A mount failure on an
+    // existing filesystem must never destroy the last cache.
+    if (cachePartitionIsErased()) {
+        Serial.println("[Dashboard Cache] initializing erased SPIFFS partition");
+        if (!SPIFFS.format()) {
+            Serial.println("[Dashboard Cache] SPIFFS initialization failed");
+            return false;
+        }
+    }
     mounted = SPIFFS.begin(false);
     if (!mounted) Serial.println("[Dashboard Cache] SPIFFS mount failed");
     return mounted;

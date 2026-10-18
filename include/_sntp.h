@@ -1,6 +1,8 @@
 #ifndef ___SNTP_H__
 #define ___SNTP_H__
 
+constexpr unsigned long SNTP_SYNC_TIMEOUT_MS = 30000;
+
 int _sntp_status();
 void _sntp_exec(int status = 0);
 void _sntp_stop();

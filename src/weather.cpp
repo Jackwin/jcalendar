@@ -142,7 +142,10 @@ void weather_exec(int status) {
         vTaskDelete(WEATHER_HANDLER);
         WEATHER_HANDLER = NULL;
     }
-    xTaskCreate(task_weather, "WeatherData", 1024 * 8, NULL, 2, &WEATHER_HANDLER);
+    if (xTaskCreate(task_weather, "WeatherData", 1024 * 8, NULL, 2, &WEATHER_HANDLER) != pdPASS) {
+        WEATHER_HANDLER = NULL;
+        _weather_status = 2;
+    }
 }
 
 void weather_stop() {

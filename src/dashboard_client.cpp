@@ -5,6 +5,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <memory>
+#include <Preferences.h>
+#include "_preference.h"
 
 #if __has_include("openai_usage_secrets.h")
 #include "openai_usage_secrets.h"
@@ -192,9 +194,12 @@ ClientResult dashboard_parse_json(const char* data, size_t length, Snapshot& sna
 
 ClientResult dashboard_fetch(Snapshot& snapshot, String& validatedJson) {
     validatedJson = "";
-    const String url = DASHBOARD_URL;
-    const String token = DASHBOARD_TOKEN;
-    const String ca = DASHBOARD_CA;
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const String url = preferences.getString(PREF_DASH_URL, DASHBOARD_URL);
+    const String token = preferences.getString(PREF_DASH_TOKEN, DASHBOARD_TOKEN);
+    const String ca = preferences.getString(PREF_DASH_CA, DASHBOARD_CA);
+    preferences.end();
     if (!url.startsWith("https://") || token.isEmpty() || ca.isEmpty()) return ClientResult::NotConfigured;
     if (!WiFi.isConnected()) return ClientResult::WifiUnavailable;
 

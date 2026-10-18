@@ -13,6 +13,7 @@
 #include "_sntp.h"
 #include "dashboard_cache.h"
 #include "dashboard_client.h"
+#include "local_dashboard.h"
 #include "led.h"
 #include "refresh_scheduler.h"
 #include "screen_ink.h"
@@ -22,7 +23,7 @@
 namespace {
 
 constexpr uint32_t WIFI_TIMEOUT_SECONDS = 10;
-constexpr uint32_t SNTP_WAIT_MS = 6000;
+constexpr uint32_t SNTP_WAIT_MS = SNTP_SYNC_TIMEOUT_MS + 1000;
 constexpr uint32_t SCREEN_WAIT_MS = 120000;
 constexpr uint32_t BUTTON_RELEASE_WAIT_MS = 2000;
 constexpr uint32_t GESTURE_WINDOW_MS = 4500;
@@ -152,6 +153,11 @@ void runConfigurationPortal() {
     preferences.begin(PREF_NAMESPACE, true);
     const uint8_t configuredPower = preferences.getUChar(PREF_POWER_MODE, 0);
     const uint16_t configuredInterval = preferences.getUShort(PREF_EXT_MINUTES, 60);
+    const String configuredDashboardUrl = preferences.getString(PREF_DASH_URL, "");
+    const String configuredWeatherHost = preferences.getString(PREF_QWEATHER_HOST, "");
+    const String configuredLocation = preferences.getString(PREF_QWEATHER_LOC, "");
+    const String configuredKid = preferences.getString(PREF_QW_JWT_KID, "");
+    const String configuredSub = preferences.getString(PREF_QW_JWT_SUB, "");
     preferences.end();
     String pendingSsid;
     String pendingPassword;
@@ -160,6 +166,8 @@ void runConfigurationPortal() {
 
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP("J-Calendar-Setup", "JCalendar");
+    Serial.printf("[Config] connect to J-Calendar-Setup; open http://%s (180 second window)\n",
+                  WiFi.softAPIP().toString().c_str());
     DNSServer dns;
     dns.start(53, "*", WiFi.softAPIP());
     WebServer server(80);
@@ -168,6 +176,20 @@ void runConfigurationPortal() {
             + "<body><h2>J-Calendar 配置</h2><form method='post' action='/save'>"
             + "<label>Wi-Fi 名称（留空则保留）</label><input name='ssid' maxlength='32'><br>"
             + "<label>Wi-Fi 密码</label><input name='password' type='password' maxlength='64'><br>"
+            + "<h3>和风天气</h3>"
+            + "<label>专属 API Host</label><input name='weather_host' maxlength='80' value='" + htmlEscape(configuredWeatherHost) + "'><br>"
+            + "<label>位置 ID / 经度,纬度</label><input name='weather_location' maxlength='48' value='" + htmlEscape(configuredLocation) + "'><br>"
+            + "<label>JWT 凭据 ID（kid）</label><input name='weather_kid' maxlength='63' value='" + htmlEscape(configuredKid) + "'><br>"
+            + "<label>JWT 项目 ID（sub）</label><input name='weather_sub' maxlength='63' value='" + htmlEscape(configuredSub) + "'><br>"
+            + "<label>Ed25519 私钥 PEM（留空保留）</label><br><textarea name='weather_private' rows='4' cols='36' maxlength='1024'></textarea>"
+            + "<h3>DeepSeek 余额</h3><label>API Key（留空保留）</label><input name='deepseek_key' type='password' maxlength='256' autocomplete='new-password'>"
+            + "<p>直接查询账户余额；Token 用量需另接统计服务。</p>"
+            + "<details><summary>可选：聚合代理服务</summary>"
+            + "<label>代理接口 HTTPS 地址</label><input name='dashboard_url' type='url' maxlength='512' value='"
+            + htmlEscape(configuredDashboardUrl) + "'><br>"
+            + "<label>代理访问令牌（留空保留）</label><input name='dashboard_token' type='password' maxlength='512' autocomplete='new-password'><br>"
+            + "<label>HTTPS 根证书 PEM（留空保留）</label><br><textarea name='dashboard_ca' rows='5' cols='36' maxlength='4096'></textarea>"
+            + "<p>已配置代理时优先使用代理数据；留空使用上方和风天气与 DeepSeek。</p></details>"
             + "<label>今日重点</label><input name='focus' maxlength='144' value='"
             + htmlEscape(configuredFocus()) + "'><br>"
             + "<label>电源模式</label><select name='power'>"
@@ -182,6 +204,19 @@ void runConfigurationPortal() {
         server.send(200, "text/html; charset=utf-8", page);
     });
     server.on("/save", HTTP_POST, [&]() {
+        String dashboardUrl = server.arg("dashboard_url");
+        String dashboardToken = server.arg("dashboard_token");
+        String dashboardCa = server.arg("dashboard_ca");
+        dashboardUrl.trim();
+        dashboardToken.trim();
+        dashboardCa.trim();
+        if ((!dashboardUrl.isEmpty() && (!dashboardUrl.startsWith("https://") || dashboardUrl.length() > 512))
+            || dashboardToken.length() > 512 || dashboardCa.length() > 4096
+            || (!dashboardCa.isEmpty() && (!dashboardCa.startsWith("-----BEGIN CERTIFICATE-----")
+                || dashboardCa.indexOf("-----END CERTIFICATE-----") < 0))) {
+            server.send(400, "text/plain; charset=utf-8", "代理地址必须为 HTTPS，证书须为 PEM 格式；请返回修改。");
+            return;
+        }
         String focus = server.arg("focus");
         if (focus.length() > dashboard::MAX_FOCUS_BYTES) {
             size_t cut = dashboard::MAX_FOCUS_BYTES;
@@ -195,6 +230,18 @@ void runConfigurationPortal() {
         writable.putString(PREF_FOCUS_TEXT, focus);
         writable.putUChar(PREF_POWER_MODE, power >= 0 && power <= 2 ? power : 0);
         writable.putUShort(PREF_EXT_MINUTES, interval == 30 ? 30 : 60);
+        if (!dashboardUrl.isEmpty()) writable.putString(PREF_DASH_URL, dashboardUrl);
+        if (!dashboardToken.isEmpty()) writable.putString(PREF_DASH_TOKEN, dashboardToken);
+        if (!dashboardCa.isEmpty()) writable.putString(PREF_DASH_CA, dashboardCa);
+        const char* weatherFields[] = {"weather_host", "weather_location", "weather_kid", "weather_sub", "weather_private", "deepseek_key"};
+        const char* weatherKeys[] = {PREF_QWEATHER_HOST, PREF_QWEATHER_LOC, PREF_QW_JWT_KID, PREF_QW_JWT_SUB, PREF_QW_JWT_PRIV, PREF_DS_KEY};
+        for (size_t i = 0; i < 6; ++i) {
+            String value = server.arg(weatherFields[i]);
+            value.trim();
+            if (!value.isEmpty()) writable.putString(weatherKeys[i], value);
+        }
+        writable.putString(PREF_QWEATHER_TYPE, "1");
+        writable.putUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
         writable.end();
         pendingSsid = server.arg("ssid");
         pendingPassword = server.arg("password");
@@ -367,7 +414,7 @@ bool buttonReleasedStable() {
 
 void enterDeepSleep() {
     _sntp_stop();
-    WiFi.disconnect(true, true);
+    WiFi.disconnect(true, false);
     WiFi.mode(WIFI_OFF);
 
     uint16_t externalMinutes = 60;
@@ -402,7 +449,10 @@ void enterDeepSleep() {
 void runMainFlow(Gesture wakeGesture) {
     bool forceRefresh = wakeGesture == Gesture::NextPage;
     bool networkAllowed = true;
-    if (wakeGesture == Gesture::Configure) {
+    WiFi.mode(WIFI_STA);
+    const bool needsWifiSetup = wifiManager.getWiFiSSID(true).isEmpty();
+    if (needsWifiSetup) Serial.println("[WiFi] no saved network; opening configuration portal");
+    if (wakeGesture == Gesture::Configure || needsWifiSetup) {
         runConfigurationPortal();
         forceRefresh = configSaved || factoryResetRequested;
         if (factoryResetRequested) {
@@ -420,6 +470,7 @@ void runMainFlow(Gesture wakeGesture) {
     const bool cacheAvailable = dashboard::dashboard_cache_load(snapshot);
     bool haveSnapshot = cacheAvailable;
     bool offline = cacheAvailable;
+    dashboard::ClientResult fetchResult = dashboard::ClientResult::WifiUnavailable;
     if (cacheAvailable) Serial.println("[Dashboard] valid cached snapshot loaded");
 
     WiFi.mode(networkAllowed ? WIFI_STA : WIFI_OFF);
@@ -428,14 +479,22 @@ void runMainFlow(Gesture wakeGesture) {
     wifiManager.setConnectTimeout(WIFI_TIMEOUT_SECONDS);
     const bool wifiConnected = networkAllowed && wifiManager.autoConnect();
     Serial.printf("[WiFi] %s\n", wifiConnected ? "connected" : "unavailable");
+    if (networkAllowed && !wifiConnected) {
+        Serial.println("[WiFi] check saved credentials/network; double-click the button after wake to configure");
+    }
 
     if (wifiConnected) {
         _sntp_exec();
         Serial.printf("[SNTP] %s\n", waitForSntp() ? "synchronized" : "timeout/failed");
+        Serial.printf("[SNTP] system epoch=%lld\n", static_cast<long long>(time(nullptr)));
 
         dashboard::Snapshot fresh;
         String json;
-        const dashboard::ClientResult result = dashboard::dashboard_fetch(fresh, json);
+        dashboard::ClientResult result = dashboard::dashboard_fetch(fresh, json);
+        if (result == dashboard::ClientResult::NotConfigured) {
+            result = dashboard::local_dashboard_fetch(fresh, json);
+        }
+        fetchResult = result;
         Serial.printf("[Dashboard] fetch=%s\n", dashboard::clientResultName(result));
         if (result == dashboard::ClientResult::Ok) {
             snapshot = fresh;
@@ -443,15 +502,40 @@ void runMainFlow(Gesture wakeGesture) {
             if (!focus.isEmpty()) snapshot.focus.text = focus;
             haveSnapshot = true;
             offline = false;
-            if (!dashboard::dashboard_cache_store(json.c_str(), json.length())) {
+            if (!json.isEmpty() && !dashboard::dashboard_cache_store(json.c_str(), json.length())) {
                 Serial.println("[Dashboard] cache update failed; continuing with fresh snapshot");
             }
         }
     }
 
-    if (haveSnapshot && page == PAGE_DASHBOARD) {
+    if (!haveSnapshot && page == PAGE_DASHBOARD) {
+        // Render actionable state on first boot instead of leaving an unrelated
+        // calendar image visible when there is no cache or usable data source.
+        const bool notConfigured = fetchResult == dashboard::ClientResult::NotConfigured;
+        const dashboard::Status state = notConfigured ? dashboard::Status::NotConfigured : dashboard::Status::Error;
+        snapshot.weather.status = state;
+        snapshot.weather.locationName = "天气";
+        snapshot.weather.condition = notConfigured ? "未配置" : "数据获取失败";
+        snapshot.usageCount = 1;
+        snapshot.usage[0].provider = "deepseek";
+        snapshot.usage[0].balance.status = state;
+        for (uint8_t i = 0; i < snapshot.usageCount; ++i) snapshot.usage[i].status = state;
+        snapshot.focus.type = "connection_error";
+        snapshot.focus.text = notConfigured ? "双击按键配置天气与 DeepSeek" : "检查网络及数据源配置";
+        time_t now = time(nullptr);
+        if (now >= 1577836800) {
+            struct tm local = {};
+            localtime_r(&now, &local);
+            char date[11];
+            strftime(date, sizeof(date), "%Y-%m-%d", &local);
+            snapshot.localDate = date;
+        }
+        offline = false;
+    }
+
+    if (page == PAGE_DASHBOARD) {
         const String focus = configuredFocus();
-        if (!focus.isEmpty()) snapshot.focus.text = focus;
+        if (haveSnapshot && !focus.isEmpty()) snapshot.focus.text = focus;
         const uint32_t hash = snapshotDisplayHash(snapshot, offline, page);
         if (displayChanged(page, hash, forceRefresh)) {
             si_dashboard(snapshot, offline);

@@ -110,7 +110,11 @@ void deepseek_exec(int status) {
         vTaskDelete(DEEPSEEK_HANDLER);
         DEEPSEEK_HANDLER = NULL;
     }
-    xTaskCreate(task_deepseek, "DS_Balance", 1024 * 8, NULL, 2, &DEEPSEEK_HANDLER);
+    if (xTaskCreate(task_deepseek, "DS_Balance", 1024 * 8, NULL, 2, &DEEPSEEK_HANDLER) != pdPASS) {
+        DEEPSEEK_HANDLER = NULL;
+        _deepseek_data.balanceStatus = DEEPSEEK_ERROR;
+        _deepseek_status = DEEPSEEK_ERROR;
+    }
 }
 
 void deepseek_exec_balance_only() {
@@ -118,6 +122,7 @@ void deepseek_exec_balance_only() {
 }
 
 void deepseek_stop() {
+    _deepseek_data.balanceStatus = DEEPSEEK_ERROR;
     if (DEEPSEEK_HANDLER != NULL) {
         vTaskDelete(DEEPSEEK_HANDLER);
         DEEPSEEK_HANDLER = NULL;

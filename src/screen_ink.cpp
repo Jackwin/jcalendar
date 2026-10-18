@@ -1035,7 +1035,8 @@ static void drawDashboardFocus(const dashboard::Snapshot& snapshot, const dashbo
     display.drawFastVLine(rect.x, rect.y + 3, rect.height - 6, GxEPD_RED);
     u8g2Fonts.setFont(FONT_TEXT);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
-    const String focus = snapshot.focus.text.isEmpty() ? "今日重点：未设置" : "今日重点：" + snapshot.focus.text;
+    const String focus = snapshot.focus.type == "connection_error" ? snapshot.focus.text
+        : snapshot.focus.text.isEmpty() ? "今日重点：未设置" : "今日重点：" + snapshot.focus.text;
     u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 24, clipUtf8ToWidth(focus, rect.width - 12).c_str());
 }
 
@@ -1057,8 +1058,27 @@ static void drawDashboardHome(const dashboard::Snapshot& snapshot, bool offline)
     if (!dashboard::layoutFits400x300(layout)) return;
     drawDashboardDate(snapshot, layout.date);
     drawDashboardWeather(snapshot, layout.weather);
-    drawDashboardUsage(dashboard::findUsage(snapshot, "openai"), layout.openai, "OpenAI", false);
-    drawDashboardUsage(dashboard::findUsage(snapshot, "deepseek"), layout.deepseek, "DeepSeek", true);
+    const dashboard::UsageData* openai = dashboard::findUsage(snapshot, "openai");
+    const dashboard::UsageData* deepseek = dashboard::findUsage(snapshot, "deepseek");
+    if (openai == nullptr && deepseek != nullptr) {
+        const dashboard::Rect rect = {8, 126, 384, 100};
+        drawDashboardCard(rect, "DeepSeek 账户余额");
+        const bool hasBalance = deepseek->balance.status == dashboard::Status::Ok
+            || deepseek->balance.status == dashboard::Status::Stale;
+        u8g2Fonts.setFont(hasBalance ? u8g2_font_helvB18_tf : FONT_TEXT);
+        String balance = hasBalance ? deepseek->balance.currency + " " + deepseek->balance.amount
+            : deepseek->balance.status == dashboard::Status::NotConfigured ? "请配置 API Key" : "余额获取失败";
+        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 51, clipUtf8ToWidth(balance, rect.width - 20).c_str());
+        u8g2Fonts.setFont(FONT_SUB);
+        const String tokens = deepseek->totalTokens.hasValue
+            ? "Token " + dashboard::formatTokenCount(deepseek->totalTokens.value)
+            : "Token 用量：未接入统计";
+        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 76, tokens.c_str());
+        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 93, "单击切换月历 · 双击配置");
+    } else {
+        drawDashboardUsage(openai, layout.openai, "OpenAI", false);
+        drawDashboardUsage(deepseek, layout.deepseek, "DeepSeek", true);
+    }
     drawDashboardFocus(snapshot, layout.focus);
     drawDashboardStatus(snapshot, layout.status, offline);
 }

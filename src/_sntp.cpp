@@ -14,15 +14,21 @@ void sntpTask(void*) {
     sntp_setoperatingmode(SNTP_OPMODE_POLL);
     sntp_setservername(0, "ntp.aliyun.com");
     sntp_setservername(1, "pool.ntp.org");
+    sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
     sntp_init();
 
     const uint32_t started = millis();
-    while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED
-           && millis() - started < 5000) {
+    bool synchronized = false;
+    while (millis() - started < SNTP_SYNC_TIMEOUT_MS && WiFi.isConnected()) {
+        // Reading COMPLETED resets the SDK status. Preserve that result rather
+        // than reading it again when deciding whether synchronization succeeded.
+        if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+            synchronized = true;
+            break;
+        }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    status = sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED
-        ? SYNC_STATUS_OK : SYNC_STATUS_NOK;
+    status = synchronized ? SYNC_STATUS_OK : SYNC_STATUS_NOK;
     handler = nullptr;
     vTaskDelete(nullptr);
 }
