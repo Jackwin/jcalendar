@@ -19,7 +19,8 @@ void si_weather();
 int si_screen_status();
 void si_screen();
 void si_dashboard(const dashboard::Snapshot& snapshot, bool offline);
-void si_screen_partial_status(); // 仅局部刷新状态栏（DeepSeek token + 电池），避免闪屏
+void si_screen_stop();
+void si_screen_partial_status(); // Legacy; dashboard flow defaults to full refresh.
 
 void print_status();
 

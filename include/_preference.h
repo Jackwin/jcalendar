@@ -40,4 +40,9 @@
 // 今日是否已完成首次全屏刷新 YYYYMMDD
 #define PREF_FULL_DATE "FULL_DATE"
 
+// Dashboard scheduler: 0 balanced, 1 saver, 2 external power.
+#define PREF_POWER_MODE "POWER_MODE"
+#define PREF_EXT_MINUTES "EXT_MINUTES"
+#define PREF_REFRESH_COUNT "REFRESH_CNT"
+
 #endif

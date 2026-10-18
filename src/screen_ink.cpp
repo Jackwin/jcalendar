@@ -1641,6 +1641,14 @@ int si_screen_status() {
     return _screen_status;
 }
 
+void si_screen_stop() {
+    if (SCREEN_HANDLER != NULL) {
+        vTaskDelete(SCREEN_HANDLER);
+        SCREEN_HANDLER = NULL;
+    }
+    _screen_status = 2;
+}
+
 /**
  * 仅局部刷新状态栏（DeepSeek token + 电池），避免全屏闪屏
  * 使用 LUT 差分刷新，不改变日历/天气区域
