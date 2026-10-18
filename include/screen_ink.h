@@ -2,6 +2,7 @@
 #define __SCREEN_INK_H__
 
 #include <Arduino.h>
+#include "dashboard_model.h"
 
 // 刷新模式：0=全刷（闪屏），1=LUT差分（无闪屏）
 extern uint8_t _refresh_mode;
@@ -17,6 +18,7 @@ void si_weather();
 
 int si_screen_status();
 void si_screen();
+void si_dashboard(const dashboard::Snapshot& snapshot, bool offline);
 void si_screen_partial_status(); // 仅局部刷新状态栏（DeepSeek token + 电池），避免闪屏
 
 void print_status();
