@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile, readdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   authenticateDevice,
@@ -103,4 +106,19 @@ test("validation rejects mismatched totals", () => {
     weather: { status: "ok" },
     usage: [{ status: "ok", input_tokens: 1, output_tokens: 2, total_tokens: 9 }],
   }), /invalid token total/);
+});
+
+test("all checked-in dashboard fixtures fit the device envelope", async () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const fixtureDirectory = resolve(here, "../../test/fixtures/dashboard");
+  const names = (await readdir(fixtureDirectory)).filter((name) => name.endsWith(".json"));
+  assert.equal(names.length, 6);
+  for (const name of names) {
+    const body = await readFile(join(fixtureDirectory, name));
+    assert.ok(body.length > 0 && body.length <= 8 * 1024, `${name} exceeds the device body limit`);
+    const fixture = JSON.parse(body.toString("utf8"));
+    validateDashboard(fixture);
+    assert.match(fixture.local_date, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(fixture.usage.length <= 2, `${name} has too many usage providers`);
+  }
 });

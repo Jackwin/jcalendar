@@ -103,7 +103,12 @@ String configuredFocus() {
 }
 
 Gesture detectWakeGesture() {
-    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT0) return Gesture::None;
+    const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+#if CONFIG_IDF_TARGET_ESP32C3
+    if (wakeCause != ESP_SLEEP_WAKEUP_GPIO) return Gesture::None;
+#else
+    if (wakeCause != ESP_SLEEP_WAKEUP_EXT0) return Gesture::None;
+#endif
     gesture = Gesture::None;
     modeButton.setDebounceMs(40);
     modeButton.setClickMs(450);
@@ -373,7 +378,11 @@ void enterDeepSleep() {
     Serial.printf("[Sleep] next wake in %lu seconds\n", static_cast<unsigned long>(seconds));
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(seconds) * 1000000ULL);
     if (buttonReleasedStable()) {
+#if CONFIG_IDF_TARGET_ESP32C3
+        esp_deep_sleep_enable_gpio_wakeup(1ULL << KEY_M, ESP_GPIO_WAKEUP_GPIO_LOW);
+#else
         esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(KEY_M), LOW);
+#endif
     } else {
         Serial.println("[Sleep] button still held; external wake disabled for this cycle");
     }
