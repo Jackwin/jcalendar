@@ -3,6 +3,7 @@
 
 int _sntp_status();
 void _sntp_exec(int status = 0);
+void _sntp_stop();
 
 typedef enum {
     SYNC_STATUS_IDLE = -1,

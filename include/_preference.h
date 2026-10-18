@@ -28,9 +28,11 @@
 
 // DeepSeek（显示 token 用量 / 账户余额）
 #define PREF_DS_KEY "DS_KEY"         // DeepSeek API Key
-#define PREF_DS_TODAY_FLASH "DS_TOK_FLASH" // flash 今日累计 token
-#define PREF_DS_TODAY_PRO "DS_TOK_PRO"   // pro 今日累计 token
-#define PREF_DS_DATE "DS_TOK_DATE"   // 今日累计 token 对应的日期 YYYYMMDD
+// Deprecated: values created by the old auto-prompt implementation are not
+// account-wide usage and must never be migrated into dashboard usage.
+#define PREF_DS_TODAY_FLASH "DS_TOK_FLASH"
+#define PREF_DS_TODAY_PRO "DS_TOK_PRO"
+#define PREF_DS_DATE "DS_TOK_DATE"
 
 // 屏幕刷新模式：0=全刷（默认，闪屏），1=LUT差分刷新（无闪屏，快速）
 #define PREF_REFRESH_MODE "REFRESH_MODE"
@@ -39,5 +41,20 @@
 #define PREF_PARTIAL_CNT "PARTIAL_CNT"
 // 今日是否已完成首次全屏刷新 YYYYMMDD
 #define PREF_FULL_DATE "FULL_DATE"
+
+// Dashboard scheduler: 0 balanced, 1 saver, 2 external power.
+#define PREF_POWER_MODE "POWER_MODE"
+#define PREF_EXT_MINUTES "EXT_MINUTES"
+#define PREF_REFRESH_COUNT "REFRESH_CNT"
+
+// Dashboard configuration schema. Migration only adds these keys and never
+// clears legacy application or Wi-Fi preferences.
+#define PREF_CONFIG_VERSION "CFG_VERSION"
+#define PREF_ACTIVE_PAGE "ACTIVE_PAGE"
+#define PREF_PAGE_COUNT "PAGE_COUNT"
+#define PREF_FOCUS_TEXT "FOCUS_TEXT"
+#define PREF_DASH_HASH "DASH_HASH"
+#define PREF_CAL_HASH "CAL_HASH"
+#define PREF_MANUAL_EPOCH "MANUAL_EPOCH"
 
 #endif

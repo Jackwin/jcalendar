@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-18T01:00:00Z",
+  "timezone": "Asia/Shanghai",
+  "local_date": "2026-10-18",
+  "weather": {"status":"ok","source":"qweather","observed_at":"2026-10-18T00:50:00Z","fetched_at":"2026-10-18T01:00:00Z","location_name":"北京","temp_c":21,"temp_min_c":14,"temp_max_c":23,"condition":"晴","condition_code":"100"},
+  "usage": [
+    {"provider":"openai","status":"ok","source":"provider_api","coverage":"project","completeness":"complete","window_start":"2026-10-17T16:00:00Z","window_end":"2026-10-18T01:00:00Z","fetched_at":"2026-10-18T01:00:00Z","observed_at":null,"input_tokens":1020000,"output_tokens":260000,"total_tokens":1280000,"balance":null},
+    {"provider":"deepseek","status":"not_configured","source":"gateway_ledger","coverage":"gateway_only","completeness":"unknown","window_start":"2026-10-17T16:00:00Z","window_end":"2026-10-18T01:00:00Z","fetched_at":null,"observed_at":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"balance":{"status":"ok","currency":"CNY","amount":"83.20","fetched_at":"2026-10-18T01:00:00Z"}}
+  ],
+  "focus": {"type":"manual","text":"阅读20分钟"},
+  "refresh_after_seconds": 7200
+}
