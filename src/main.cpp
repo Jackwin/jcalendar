@@ -1,5 +1,8 @@
 #include <Arduino.h>
+#include <DNSServer.h>
+#include <OneButton.h>
 #include <Preferences.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
 
@@ -22,9 +25,286 @@ constexpr uint32_t WIFI_TIMEOUT_SECONDS = 10;
 constexpr uint32_t SNTP_WAIT_MS = 6000;
 constexpr uint32_t SCREEN_WAIT_MS = 120000;
 constexpr uint32_t BUTTON_RELEASE_WAIT_MS = 2000;
+constexpr uint32_t GESTURE_WINDOW_MS = 4500;
+constexpr uint32_t CONFIG_WINDOW_MS = 180000;
+constexpr uint16_t CONFIG_VERSION = 1;
+constexpr uint8_t PAGE_COUNT = 2;
+constexpr uint8_t PAGE_DASHBOARD = 0;
+constexpr uint8_t PAGE_CALENDAR = 1;
 
 WiFiManager wifiManager;
+OneButton modeButton(KEY_M, true, true);
 bool mainFlowComplete = false;
+bool configSaved = false;
+bool factoryResetRequested = false;
+
+enum class Gesture : uint8_t {
+    None,
+    NextPage,
+    Configure,
+    ManualRefresh,
+};
+
+Gesture gesture = Gesture::None;
+
+void onClick() { gesture = Gesture::NextPage; }
+void onDoubleClick() { gesture = Gesture::Configure; }
+void onLongPress() { gesture = Gesture::ManualRefresh; }
+
+void migratePreferences() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    const uint16_t version = preferences.getUShort(PREF_CONFIG_VERSION, 0);
+    if (version < 1) {
+        if (!preferences.isKey(PREF_ACTIVE_PAGE)) preferences.putUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+        if (!preferences.isKey(PREF_PAGE_COUNT)) preferences.putUChar(PREF_PAGE_COUNT, PAGE_COUNT);
+        if (!preferences.isKey(PREF_POWER_MODE)) preferences.putUChar(PREF_POWER_MODE, 0);
+        if (!preferences.isKey(PREF_EXT_MINUTES)) preferences.putUShort(PREF_EXT_MINUTES, 60);
+        if (!preferences.isKey(PREF_FOCUS_TEXT)) preferences.putString(PREF_FOCUS_TEXT, "");
+        preferences.putUShort(PREF_CONFIG_VERSION, CONFIG_VERSION);
+    }
+    if (preferences.getUChar(PREF_PAGE_COUNT, PAGE_COUNT) != PAGE_COUNT) {
+        preferences.putUChar(PREF_PAGE_COUNT, PAGE_COUNT);
+    }
+    if (preferences.getUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD) >= PAGE_COUNT) {
+        preferences.putUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+    }
+    preferences.end();
+}
+
+uint8_t activePage() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const uint8_t page = preferences.getUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+    preferences.end();
+    return page < PAGE_COUNT ? page : PAGE_DASHBOARD;
+}
+
+uint8_t advancePage() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    const uint8_t page = (preferences.getUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD) + 1) % PAGE_COUNT;
+    preferences.putUChar(PREF_ACTIVE_PAGE, page);
+    preferences.end();
+    return page;
+}
+
+String configuredFocus() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    String focus = preferences.getString(PREF_FOCUS_TEXT, "");
+    preferences.end();
+    if (focus.length() > dashboard::MAX_FOCUS_BYTES) {
+        size_t cut = dashboard::MAX_FOCUS_BYTES;
+        while (cut > 0 && (static_cast<uint8_t>(focus[cut]) & 0xc0) == 0x80) --cut;
+        focus.remove(cut);
+    }
+    return focus;
+}
+
+Gesture detectWakeGesture() {
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT0) return Gesture::None;
+    gesture = Gesture::None;
+    modeButton.setDebounceMs(40);
+    modeButton.setClickMs(450);
+    modeButton.setPressMs(3000);
+    modeButton.attachClick(onClick);
+    modeButton.attachDoubleClick(onDoubleClick);
+    modeButton.attachLongPressStart(onLongPress);
+    const uint32_t started = millis();
+    while (gesture == Gesture::None && millis() - started < GESTURE_WINDOW_MS) {
+        modeButton.tick();
+        delay(10);
+    }
+    Serial.printf("[Button] gesture=%u\n", static_cast<unsigned>(gesture));
+    return gesture;
+}
+
+bool manualRefreshAllowed() {
+    time_t now = 0;
+    time(&now);
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    const uint64_t previous = preferences.getULong64(PREF_MANUAL_EPOCH, 0);
+    const bool validClock = now >= 1577836800;
+    const bool allowed = !validClock || previous == 0 || static_cast<uint64_t>(now) >= previous + 30;
+    if (allowed && validClock) preferences.putULong64(PREF_MANUAL_EPOCH, static_cast<uint64_t>(now));
+    preferences.end();
+    return allowed;
+}
+
+String htmlEscape(String value) {
+    value.replace("&", "&amp;");
+    value.replace("<", "&lt;");
+    value.replace(">", "&gt;");
+    value.replace("\"", "&quot;");
+    value.replace("'", "&#39;");
+    return value;
+}
+
+void runConfigurationPortal() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const uint8_t configuredPower = preferences.getUChar(PREF_POWER_MODE, 0);
+    const uint16_t configuredInterval = preferences.getUShort(PREF_EXT_MINUTES, 60);
+    preferences.end();
+    String pendingSsid;
+    String pendingPassword;
+    configSaved = false;
+    factoryResetRequested = false;
+
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP("J-Calendar-Setup", "JCalendar");
+    DNSServer dns;
+    dns.start(53, "*", WiFi.softAPIP());
+    WebServer server(80);
+    server.on("/", HTTP_GET, [&]() {
+        const String page = String("<html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>")
+            + "<body><h2>J-Calendar 配置</h2><form method='post' action='/save'>"
+            + "<label>Wi-Fi 名称（留空则保留）</label><input name='ssid' maxlength='32'><br>"
+            + "<label>Wi-Fi 密码</label><input name='password' type='password' maxlength='64'><br>"
+            + "<label>今日重点</label><input name='focus' maxlength='144' value='"
+            + htmlEscape(configuredFocus()) + "'><br>"
+            + "<label>电源模式</label><select name='power'>"
+            + "<option value='0'" + (configuredPower == 0 ? " selected" : "") + ">均衡</option>"
+            + "<option value='1'" + (configuredPower == 1 ? " selected" : "") + ">省电</option>"
+            + "<option value='2'" + (configuredPower == 2 ? " selected" : "") + ">外接电源</option></select><br>"
+            + "<label>外接刷新间隔</label><select name='interval'>"
+            + "<option value='30'" + (configuredInterval == 30 ? " selected" : "") + ">30 分钟</option>"
+            + "<option value='60'" + (configuredInterval != 30 ? " selected" : "") + ">60 分钟</option></select><br>"
+            + "<button type='submit'>保存并退出</button></form>"
+            + "<p><a href='/factory-confirm'>恢复出厂设置（需要再次确认）</a></p></body></html>";
+        server.send(200, "text/html; charset=utf-8", page);
+    });
+    server.on("/save", HTTP_POST, [&]() {
+        String focus = server.arg("focus");
+        if (focus.length() > dashboard::MAX_FOCUS_BYTES) {
+            size_t cut = dashboard::MAX_FOCUS_BYTES;
+            while (cut > 0 && (static_cast<uint8_t>(focus[cut]) & 0xc0) == 0x80) --cut;
+            focus.remove(cut);
+        }
+        const int power = server.arg("power").toInt();
+        const int interval = server.arg("interval").toInt();
+        Preferences writable;
+        writable.begin(PREF_NAMESPACE, false);
+        writable.putString(PREF_FOCUS_TEXT, focus);
+        writable.putUChar(PREF_POWER_MODE, power >= 0 && power <= 2 ? power : 0);
+        writable.putUShort(PREF_EXT_MINUTES, interval == 30 ? 30 : 60);
+        writable.end();
+        pendingSsid = server.arg("ssid");
+        pendingPassword = server.arg("password");
+        configSaved = true;
+        server.send(200, "text/html; charset=utf-8", "<html><meta charset='utf-8'><body>设置已保存，配置窗口正在关闭。</body></html>");
+    });
+    server.on("/factory-confirm", HTTP_GET, [&]() {
+        server.send(200, "text/html; charset=utf-8",
+            "<html><meta charset='utf-8'><body><h2>恢复出厂设置</h2>"
+            "<p>此操作会清除设备配置和 Wi-Fi。请输入 RESET 再确认。</p>"
+            "<form method='post' action='/factory-reset'><input name='confirm'>"
+            "<button type='submit'>确认清除</button></form><a href='/'>取消</a></body></html>");
+    });
+    server.on("/factory-reset", HTTP_POST, [&]() {
+        if (!server.hasArg("confirm") || server.arg("confirm") != "RESET") {
+            server.send(400, "text/plain; charset=utf-8", "确认文字不正确，未清除任何设置");
+            return;
+        }
+        factoryResetRequested = true;
+        server.send(200, "text/plain; charset=utf-8", "已确认，配置即将清除");
+    });
+    server.onNotFound([&]() {
+        server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
+        server.send(302, "text/plain", "");
+    });
+    server.begin();
+    const uint32_t started = millis();
+    while (!configSaved && !factoryResetRequested && millis() - started < CONFIG_WINDOW_MS) {
+        dns.processNextRequest();
+        server.handleClient();
+        delay(10);
+    }
+    server.stop();
+    dns.stop();
+    WiFi.softAPdisconnect(true);
+    if (factoryResetRequested) {
+        Preferences writable;
+        writable.begin(PREF_NAMESPACE, false);
+        writable.clear();
+        writable.end();
+        wifiManager.resetSettings();
+        Serial.println("[Config] factory reset confirmed and completed");
+    } else {
+        if (configSaved && !pendingSsid.isEmpty()) {
+            WiFi.persistent(true);
+            WiFi.begin(pendingSsid.c_str(), pendingPassword.c_str());
+            WiFi.persistent(false);
+        }
+        Serial.printf("[Config] portal closed (%s)\n", configSaved ? "saved" : "timeout");
+    }
+    WiFi.mode(WIFI_STA);
+}
+
+uint32_t fnvAppend(uint32_t hash, const String& value) {
+    for (size_t i = 0; i < value.length(); ++i) {
+        hash ^= static_cast<uint8_t>(value[i]);
+        hash *= 16777619UL;
+    }
+    return hash;
+}
+
+uint32_t snapshotDisplayHash(const dashboard::Snapshot& snapshot, bool offline, uint8_t page) {
+    uint32_t hash = 2166136261UL;
+    hash = fnvAppend(hash, String(page));
+    hash = fnvAppend(hash, String(offline));
+    hash = fnvAppend(hash, snapshot.localDate);
+    hash = fnvAppend(hash, snapshot.weather.locationName);
+    hash = fnvAppend(hash, snapshot.weather.condition);
+    hash = fnvAppend(hash, String(static_cast<uint8_t>(snapshot.weather.status)));
+    if (snapshot.weather.tempC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempC.value));
+    if (snapshot.weather.tempMinC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMinC.value));
+    if (snapshot.weather.tempMaxC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMaxC.value));
+    for (uint8_t i = 0; i < snapshot.usageCount; ++i) {
+        const dashboard::UsageData& usage = snapshot.usage[i];
+        hash = fnvAppend(hash, usage.provider + usage.coverage + String(static_cast<uint8_t>(usage.status)));
+        if (usage.inputTokens.hasValue) hash = fnvAppend(hash, String(usage.inputTokens.value));
+        if (usage.outputTokens.hasValue) hash = fnvAppend(hash, String(usage.outputTokens.value));
+        if (usage.totalTokens.hasValue) hash = fnvAppend(hash, String(usage.totalTokens.value));
+        hash = fnvAppend(hash, usage.balance.currency + usage.balance.amount
+            + String(static_cast<uint8_t>(usage.balance.status)));
+    }
+    hash = fnvAppend(hash, snapshot.focus.text);
+    return hash;
+}
+
+uint32_t calendarDisplayHash() {
+    time_t now = 0;
+    time(&now);
+    struct tm local = {};
+    localtime_r(&now, &local);
+    char date[16];
+    snprintf(date, sizeof(date), "%04d-%02d-%02d", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday);
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const String content = String(date) + preferences.getString(PREF_TODO_LIST, "")
+        + preferences.getString(PREF_WORD_LIST, "") + preferences.getString(PREF_SI_WEEK_1ST, "0");
+    preferences.end();
+    return fnvAppend(2166136261UL, content);
+}
+
+bool displayChanged(uint8_t page, uint32_t hash, bool force) {
+    if (force) return true;
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const uint32_t previous = preferences.getUInt(page == PAGE_DASHBOARD ? PREF_DASH_HASH : PREF_CAL_HASH, 0);
+    preferences.end();
+    return previous == 0 || previous != hash;
+}
+
+void storeDisplayHash(uint8_t page, uint32_t hash) {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    preferences.putUInt(page == PAGE_DASHBOARD ? PREF_DASH_HASH : PREF_CAL_HASH, hash);
+    preferences.end();
+}
 
 bool waitForSntp() {
     const uint32_t started = millis();
@@ -110,18 +390,34 @@ void enterDeepSleep() {
     esp_deep_sleep_start();
 }
 
-void runMainFlow() {
+void runMainFlow(Gesture wakeGesture) {
+    bool forceRefresh = wakeGesture == Gesture::NextPage;
+    bool networkAllowed = true;
+    if (wakeGesture == Gesture::Configure) {
+        runConfigurationPortal();
+        forceRefresh = configSaved || factoryResetRequested;
+        if (factoryResetRequested) {
+            migratePreferences();
+        }
+    } else if (wakeGesture == Gesture::ManualRefresh) {
+        forceRefresh = manualRefreshAllowed();
+        networkAllowed = forceRefresh;
+        if (!forceRefresh) Serial.println("[Button] manual refresh ignored during 30 second cooldown");
+    }
+
+    uint8_t page = activePage();
+    if (wakeGesture == Gesture::NextPage) page = advancePage();
     dashboard::Snapshot snapshot;
     const bool cacheAvailable = dashboard::dashboard_cache_load(snapshot);
     bool haveSnapshot = cacheAvailable;
     bool offline = cacheAvailable;
     if (cacheAvailable) Serial.println("[Dashboard] valid cached snapshot loaded");
 
-    WiFi.mode(WIFI_STA);
+    WiFi.mode(networkAllowed ? WIFI_STA : WIFI_OFF);
     wifiManager.setHostname("J-Calendar");
     wifiManager.setEnableConfigPortal(false);
     wifiManager.setConnectTimeout(WIFI_TIMEOUT_SECONDS);
-    const bool wifiConnected = wifiManager.autoConnect();
+    const bool wifiConnected = networkAllowed && wifiManager.autoConnect();
     Serial.printf("[WiFi] %s\n", wifiConnected ? "connected" : "unavailable");
 
     if (wifiConnected) {
@@ -134,6 +430,8 @@ void runMainFlow() {
         Serial.printf("[Dashboard] fetch=%s\n", dashboard::clientResultName(result));
         if (result == dashboard::ClientResult::Ok) {
             snapshot = fresh;
+            const String focus = configuredFocus();
+            if (!focus.isEmpty()) snapshot.focus.text = focus;
             haveSnapshot = true;
             offline = false;
             if (!dashboard::dashboard_cache_store(json.c_str(), json.length())) {
@@ -142,9 +440,30 @@ void runMainFlow() {
         }
     }
 
-    if (haveSnapshot) {
-        si_dashboard(snapshot, offline);
-        if (waitForScreen()) recordSuccessfulRefresh();
+    if (haveSnapshot && page == PAGE_DASHBOARD) {
+        const String focus = configuredFocus();
+        if (!focus.isEmpty()) snapshot.focus.text = focus;
+        const uint32_t hash = snapshotDisplayHash(snapshot, offline, page);
+        if (displayChanged(page, hash, forceRefresh)) {
+            si_dashboard(snapshot, offline);
+            if (waitForScreen()) {
+                recordSuccessfulRefresh();
+                storeDisplayHash(page, hash);
+            }
+        } else {
+            Serial.println("[Screen] dashboard content unchanged; full refresh skipped");
+        }
+    } else if (page == PAGE_CALENDAR) {
+        const uint32_t hash = calendarDisplayHash();
+        if (displayChanged(page, hash, forceRefresh)) {
+            si_screen();
+            if (waitForScreen()) {
+                recordSuccessfulRefresh();
+                storeDisplayHash(page, hash);
+            }
+        } else {
+            Serial.println("[Screen] calendar content unchanged; full refresh skipped");
+        }
     } else {
         Serial.println("[Dashboard] no usable fresh or cached snapshot; preserving current e-paper image");
     }
@@ -160,6 +479,7 @@ void setup() {
     tzset();
     Serial.printf("\n=== J-Calendar %s ===\n", J_VERSION);
     Serial.printf("[Wake] cause=%d\n", static_cast<int>(esp_sleep_get_wakeup_cause()));
+    migratePreferences();
     led_init();
     led_on();
     delay(100);
@@ -172,5 +492,5 @@ void loop() {
         return;
     }
     mainFlowComplete = true;
-    runMainFlow();
+    runMainFlow(detectWakeGesture());
 }

@@ -1554,7 +1554,9 @@ void task_screen(void* param) {
     display.fillScreen(GxEPD_WHITE);
     do {
         display.fillScreen(GxEPD_WHITE);
-        draw_deepseek_token_panel();
+        draw_compact_calendar();
+        display.drawFastHLine(0, CALENDAR_PANEL_HEIGHT + 5, display.width(), GxEPD_BLACK);
+        draw_daily_brief(CALENDAR_PANEL_HEIGHT + 28);
     } while (display.nextPage());
 
     int32_t _calendar_date = (tmInfo.tm_year + 1900) * 10000 + (tmInfo.tm_mon + 1) * 100 + tmInfo.tm_mday;

@@ -45,4 +45,14 @@
 #define PREF_EXT_MINUTES "EXT_MINUTES"
 #define PREF_REFRESH_COUNT "REFRESH_CNT"
 
+// Dashboard configuration schema. Migration only adds these keys and never
+// clears legacy application or Wi-Fi preferences.
+#define PREF_CONFIG_VERSION "CFG_VERSION"
+#define PREF_ACTIVE_PAGE "ACTIVE_PAGE"
+#define PREF_PAGE_COUNT "PAGE_COUNT"
+#define PREF_FOCUS_TEXT "FOCUS_TEXT"
+#define PREF_DASH_HASH "DASH_HASH"
+#define PREF_CAL_HASH "CAL_HASH"
+#define PREF_MANUAL_EPOCH "MANUAL_EPOCH"
+
 #endif
