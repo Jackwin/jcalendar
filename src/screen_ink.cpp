@@ -929,7 +929,7 @@ static String clipUtf8ToWidth(String text, uint16_t maxWidth) {
 }
 
 static void drawDashboardCard(const dashboard::Rect& rect, const char* title) {
-    display.drawRoundRect(rect.x, rect.y, rect.width, rect.height, 4, GxEPD_BLACK);
+    display.drawRoundRect(rect.x, rect.y, rect.width, rect.height, 4, GxEPD_RED);
     u8g2Fonts.setFont(FONT_TEXT);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
@@ -963,13 +963,35 @@ static void drawDashboardDate(const dashboard::Snapshot& snapshot, const dashboa
 }
 
 static void drawDashboardWeather(const dashboard::Snapshot& snapshot, const dashboard::Rect& rect) {
-    display.drawRoundRect(rect.x, rect.y, rect.width, rect.height, 4, GxEPD_BLACK);
+    display.drawRoundRect(rect.x, rect.y, rect.width, rect.height, 4, GxEPD_RED);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     u8g2Fonts.setFont(FONT_TEXT);
-    String heading = snapshot.weather.locationName;
-    if (!snapshot.weather.condition.isEmpty()) heading += "  " + snapshot.weather.condition;
+    String heading = snapshot.weather.locationName.isEmpty() ? "和风天气" : snapshot.weather.locationName;
+    if (heading == "101010100") heading = "北京";
+    if (snapshot.weather.status == dashboard::Status::Ok
+        || snapshot.weather.status == dashboard::Status::Stale) {
+        if (!snapshot.weather.condition.isEmpty()) heading += "  " + snapshot.weather.condition;
+    }
     u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 22, clipUtf8ToWidth(heading, rect.width - 20).c_str());
+
+    const bool hasRange = snapshot.weather.tempMinC.hasValue && snapshot.weather.tempMaxC.hasValue;
+    const bool hasWeather = snapshot.weather.tempC.hasValue || hasRange;
+    if (!hasWeather) {
+        String message = "天气暂无数据";
+        String hint = "等待下次刷新";
+        if (snapshot.weather.status == dashboard::Status::NotConfigured) {
+            message = "天气未配置";
+            hint = "双击配置密钥和位置";
+        } else if (snapshot.weather.status == dashboard::Status::Error) {
+            message = "天气获取失败";
+            hint = "检查网络后重试";
+        }
+        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 51, message.c_str());
+        u8g2Fonts.drawUTF8(rect.x + 142, rect.y + 51,
+                           clipUtf8ToWidth(hint, rect.width - 152).c_str());
+        return;
+    }
 
     if (snapshot.weather.tempC.hasValue) {
         const String temperature = String(snapshot.weather.tempC.value);
@@ -979,22 +1001,24 @@ static void drawDashboardWeather(const dashboard::Snapshot& snapshot, const dash
         u8g2Fonts.setFont(FONT_TEXT);
         u8g2Fonts.drawUTF8(unitX, rect.y + 51, "°C");
     } else {
-        String temperature = "天气未知";
-        if (snapshot.weather.tempMinC.hasValue && snapshot.weather.tempMaxC.hasValue) {
-            temperature = String(snapshot.weather.tempMinC.value) + "–"
-                + String(snapshot.weather.tempMaxC.value) + "°C";
-        }
+        const String temperature = String(snapshot.weather.tempMinC.value) + "–"
+            + String(snapshot.weather.tempMaxC.value) + "°C";
         u8g2Fonts.setFont(FONT_TEXT);
         u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 51, temperature.c_str());
     }
 
     u8g2Fonts.setFont(FONT_SUB);
     String range;
-    if (snapshot.weather.tempMinC.hasValue && snapshot.weather.tempMaxC.hasValue) {
+    if (snapshot.weather.tempC.hasValue && hasRange) {
         range = "今日 " + String(snapshot.weather.tempMinC.value) + "–"
             + String(snapshot.weather.tempMaxC.value) + "°C";
     }
-    if (snapshot.weather.status == dashboard::Status::Stale) range += " · 数据延迟";
+    if (snapshot.weather.tempC.hasValue && snapshot.weather.observedAt.length() >= 16) {
+        const String observedTime = snapshot.weather.observedAt.substring(11, 16);
+        if (!range.isEmpty()) range += " · ";
+        range += "实况 " + observedTime;
+    }
+    if (snapshot.weather.status == dashboard::Status::Stale) range = "数据延迟";
     else if (snapshot.weather.status == dashboard::Status::Error) range = "天气获取失败";
     u8g2Fonts.drawUTF8(rect.x + 142, rect.y + 51, clipUtf8ToWidth(range, rect.width - 152).c_str());
 }
@@ -1068,13 +1092,15 @@ static void drawDashboardHome(const dashboard::Snapshot& snapshot, bool offline)
         u8g2Fonts.setFont(hasBalance ? u8g2_font_helvB18_tf : FONT_TEXT);
         String balance = hasBalance ? deepseek->balance.currency + " " + deepseek->balance.amount
             : deepseek->balance.status == dashboard::Status::NotConfigured ? "请配置 API Key" : "余额获取失败";
-        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 51, clipUtf8ToWidth(balance, rect.width - 20).c_str());
+        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 55, clipUtf8ToWidth(balance, 216).c_str());
+        display.drawFastVLine(rect.x + 232, rect.y + 30, 47, GxEPD_BLACK);
         u8g2Fonts.setFont(FONT_SUB);
+        u8g2Fonts.drawUTF8(rect.x + 244, rect.y + 48, "Token 用量");
         const String tokens = deepseek->totalTokens.hasValue
-            ? "Token " + dashboard::formatTokenCount(deepseek->totalTokens.value)
-            : "Token 用量：未接入统计";
-        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 76, tokens.c_str());
-        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 93, "单击切换月历 · 双击配置");
+            ? dashboard::formatTokenCount(deepseek->totalTokens.value) : "暂未接入";
+        u8g2Fonts.drawUTF8(rect.x + 244, rect.y + 68,
+                           clipUtf8ToWidth(tokens, rect.width - 254).c_str());
+        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 92, "单击月历 · 双击配置");
     } else {
         drawDashboardUsage(openai, layout.openai, "OpenAI", false);
         drawDashboardUsage(deepseek, layout.deepseek, "DeepSeek", true);

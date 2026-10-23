@@ -66,7 +66,7 @@ ClientResult local_dashboard_fetch(Snapshot& snapshot, String& validatedJson) {
             weather["temp_c"] = current->temp;
             weather["condition"] = current->text;
             weather["condition_code"] = String(current->icon);
-            weather["observed_at"] = current->updateTime;
+            weather["observed_at"] = current->time.isEmpty() ? current->updateTime : current->time;
         }
     }
 

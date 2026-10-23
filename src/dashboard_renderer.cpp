@@ -96,12 +96,18 @@ String snapshotStateLabel(const Snapshot& snapshot, bool offline) {
     if (snapshot.weather.status == Status::Stale) return "天气数据有延迟";
     if (snapshot.weather.status == Status::Error) return "天气获取失败";
     if (snapshot.weather.status == Status::NotConfigured) return "请双击配置和风天气";
+    if (snapshot.weather.status == Status::Unknown) return "天气暂无数据";
+    bool usageUnavailable = false;
+    bool balanceUpdated = false;
     for (uint8_t i = 0; i < snapshot.usageCount; ++i) {
         if (snapshot.usage[i].balance.status == Status::Error) return "余额获取失败";
         if (snapshot.usage[i].balance.status == Status::NotConfigured) return "请双击配置 DeepSeek";
         if (snapshot.usage[i].status == Status::Stale) return "用量数据有延迟";
         if (snapshot.usage[i].status == Status::Error) return "部分数据失败";
+        usageUnavailable |= snapshot.usage[i].status == Status::Unsupported;
+        balanceUpdated |= snapshot.usage[i].balance.status == Status::Ok;
     }
+    if (usageUnavailable) return balanceUpdated ? "余额已更新 · 用量未接入" : "用量未接入";
     return "数据已更新";
 }
 

@@ -305,11 +305,14 @@ uint32_t fnvAppend(uint32_t hash, const String& value) {
 
 uint32_t snapshotDisplayHash(const dashboard::Snapshot& snapshot, bool offline, uint8_t page) {
     uint32_t hash = 2166136261UL;
+    // A firmware-only layout change must invalidate the persisted e-paper image.
+    hash = fnvAppend(hash, "dashboard-layout-v2");
     hash = fnvAppend(hash, String(page));
     hash = fnvAppend(hash, String(offline));
     hash = fnvAppend(hash, snapshot.localDate);
     hash = fnvAppend(hash, snapshot.weather.locationName);
     hash = fnvAppend(hash, snapshot.weather.condition);
+    hash = fnvAppend(hash, snapshot.weather.observedAt);
     hash = fnvAppend(hash, String(static_cast<uint8_t>(snapshot.weather.status)));
     if (snapshot.weather.tempC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempC.value));
     if (snapshot.weather.tempMinC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMinC.value));
