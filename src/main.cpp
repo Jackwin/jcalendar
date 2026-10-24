@@ -117,6 +117,14 @@ Gesture detectWakeGesture() {
     modeButton.attachClick(onClick);
     modeButton.attachDoubleClick(onDoubleClick);
     modeButton.attachLongPressStart(onLongPress);
+    // EXT0/GPIO wake proves that the button was pressed, even if a short tap
+    // ended while setup() initialized NVS and the LED. Seed OneButton with
+    // that first press so a released wake tap is not silently discarded.
+    const uint32_t seedStarted = millis();
+    do {
+        modeButton.tick(true);
+        delay(10);
+    } while (millis() - seedStarted <= 50);
     const uint32_t started = millis();
     while (gesture == Gesture::None && millis() - started < GESTURE_WINDOW_MS) {
         modeButton.tick();
@@ -306,7 +314,7 @@ uint32_t fnvAppend(uint32_t hash, const String& value) {
 uint32_t snapshotDisplayHash(const dashboard::Snapshot& snapshot, bool offline, uint8_t page) {
     uint32_t hash = 2166136261UL;
     // A firmware-only layout change must invalidate the persisted e-paper image.
-    hash = fnvAppend(hash, "dashboard-layout-v2");
+    hash = fnvAppend(hash, "dashboard-layout-v5");
     hash = fnvAppend(hash, String(page));
     hash = fnvAppend(hash, String(offline));
     hash = fnvAppend(hash, snapshot.localDate);
@@ -330,7 +338,7 @@ uint32_t snapshotDisplayHash(const dashboard::Snapshot& snapshot, bool offline, 
     return hash;
 }
 
-uint32_t calendarDisplayHash() {
+uint32_t calendarDisplayHash(const dashboard::Snapshot& snapshot, bool offline) {
     time_t now = 0;
     time(&now);
     struct tm local = {};
@@ -342,7 +350,15 @@ uint32_t calendarDisplayHash() {
     const String content = String(date) + preferences.getString(PREF_TODO_LIST, "")
         + preferences.getString(PREF_WORD_LIST, "") + preferences.getString(PREF_SI_WEEK_1ST, "0");
     preferences.end();
-    return fnvAppend(2166136261UL, content);
+    uint32_t hash = fnvAppend(2166136261UL, "calendar-bottom-v4");
+    hash = fnvAppend(hash, content);
+    hash = fnvAppend(hash, snapshot.localDate);
+    hash = fnvAppend(hash, snapshot.weather.locationName + snapshot.weather.condition);
+    if (snapshot.weather.tempC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempC.value));
+    if (snapshot.weather.tempMinC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMinC.value));
+    if (snapshot.weather.tempMaxC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMaxC.value));
+    hash = fnvAppend(hash, snapshot.focus.text);
+    return fnvAppend(hash, String(offline));
 }
 
 bool displayChanged(uint8_t page, uint32_t hash, bool force) {
@@ -475,6 +491,10 @@ void runMainFlow(Gesture wakeGesture) {
     bool offline = cacheAvailable;
     dashboard::ClientResult fetchResult = dashboard::ClientResult::WifiUnavailable;
     if (cacheAvailable) Serial.println("[Dashboard] valid cached snapshot loaded");
+    if (wakeGesture == Gesture::NextPage && cacheAvailable) {
+        networkAllowed = false;
+        Serial.println("[Button] page switch uses cached snapshot; network refresh deferred");
+    }
 
     WiFi.mode(networkAllowed ? WIFI_STA : WIFI_OFF);
     wifiManager.setHostname("J-Calendar");
@@ -536,9 +556,9 @@ void runMainFlow(Gesture wakeGesture) {
         offline = false;
     }
 
+    const String focus = configuredFocus();
+    if (!focus.isEmpty()) snapshot.focus.text = focus;
     if (page == PAGE_DASHBOARD) {
-        const String focus = configuredFocus();
-        if (haveSnapshot && !focus.isEmpty()) snapshot.focus.text = focus;
         const uint32_t hash = snapshotDisplayHash(snapshot, offline, page);
         if (displayChanged(page, hash, forceRefresh)) {
             si_dashboard(snapshot, offline);
@@ -550,9 +570,9 @@ void runMainFlow(Gesture wakeGesture) {
             Serial.println("[Screen] dashboard content unchanged; full refresh skipped");
         }
     } else if (page == PAGE_CALENDAR) {
-        const uint32_t hash = calendarDisplayHash();
+        const uint32_t hash = calendarDisplayHash(snapshot, offline);
         if (displayChanged(page, hash, forceRefresh)) {
-            si_screen();
+            si_screen(snapshot, offline);
             if (waitForScreen()) {
                 recordSuccessfulRefresh();
                 storeDisplayHash(page, hash);

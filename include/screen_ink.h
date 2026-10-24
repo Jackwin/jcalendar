@@ -17,7 +17,7 @@ int si_weather_status();
 void si_weather();
 
 int si_screen_status();
-void si_screen();
+void si_screen(const dashboard::Snapshot& snapshot, bool offline);
 void si_dashboard(const dashboard::Snapshot& snapshot, bool offline);
 void si_screen_stop();
 void si_screen_partial_status(); // Legacy; dashboard flow defaults to full refresh.

@@ -51,16 +51,28 @@ ClientResult local_dashboard_fetch(Snapshot& snapshot, String& validatedJson) {
     weather["temp_c"] = nullptr;
     weather["temp_min_c"] = nullptr;
     weather["temp_max_c"] = nullptr;
-    weather["condition"] = weather_status() == 3 ? "未配置" : "获取失败";
+    weather["condition"] = weatherOk ? "暂无今日预报" : weather_status() == 3 ? "未配置" : "获取失败";
     weather["condition_code"] = "";
     if (weatherOk) {
         const DailyForecast* forecast = weather_data_daily();
-        const DailyWeather& today = forecast->weather[0];
-        weather["temp_min_c"] = today.tempMin;
-        weather["temp_max_c"] = today.tempMax;
-        weather["condition"] = today.textDay;
-        weather["condition_code"] = String(today.iconDay);
-        weather["observed_at"] = forecast->updateTime;
+        const DailyWeather* today = nullptr;
+        for (uint8_t i = 0; i < forecast->length; ++i) {
+            if (forecast->weather[i].date == date) {
+                today = &forecast->weather[i];
+                break;
+            }
+        }
+        if (today != nullptr) {
+            weather["temp_min_c"] = today->tempMin;
+            weather["temp_max_c"] = today->tempMax;
+            weather["condition"] = today->textDay;
+            weather["condition_code"] = String(today->iconDay);
+            weather["observed_at"] = forecast->updateTime;
+            Serial.printf("[Direct] today=%s range=%d..%d C\n", date,
+                          today->tempMin, today->tempMax);
+        } else {
+            Serial.printf("[Direct] no forecast matching local date %s\n", date);
+        }
         if (weather_type() == 1) {
             const Weather* current = weather_data_now();
             weather["temp_c"] = current->temp;

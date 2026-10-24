@@ -23,7 +23,7 @@ uint8_t _refresh_mode = 0;
 
 #include "font.h"
 #define ROTATION 0
-#define CALENDAR_PANEL_HEIGHT 190
+#define CALENDAR_PANEL_HEIGHT 210
 
 #include "wiring.h"
 GxEPD2_DISPLAY_CLASS<GxEPD2_DRIVER_CLASS, GxEPD2_DRIVER_CLASS::HEIGHT> display(GxEPD2_DRIVER_CLASS(/*CS=D8*/ SPI_CS, /*DC=D3*/ SPI_DC, /*RST=D4*/ SPI_RST, /*BUSY=D2*/ SPI_BUSY));
@@ -928,8 +928,14 @@ static String clipUtf8ToWidth(String text, uint16_t maxWidth) {
     return text;
 }
 
-static void drawDashboardCard(const dashboard::Rect& rect, const char* title) {
+static void drawDashboardFrame(const dashboard::Rect& rect) {
     display.drawRoundRect(rect.x, rect.y, rect.width, rect.height, 4, GxEPD_RED);
+    display.drawRoundRect(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2, 4, GxEPD_RED);
+    display.drawFastHLine(rect.x + 12, rect.y + 5, 36, GxEPD_RED);
+}
+
+static void drawDashboardCard(const dashboard::Rect& rect, const char* title) {
+    drawDashboardFrame(rect);
     u8g2Fonts.setFont(FONT_TEXT);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
@@ -960,10 +966,11 @@ static void drawDashboardDate(const dashboard::Snapshot& snapshot, const dashboa
     }
 #endif
     display.drawFastHLine(rect.x, rect.y + rect.height - 1, rect.width, GxEPD_BLACK);
+    display.drawFastHLine(rect.x, rect.y + rect.height - 2, 72, GxEPD_RED);
 }
 
 static void drawDashboardWeather(const dashboard::Snapshot& snapshot, const dashboard::Rect& rect) {
-    display.drawRoundRect(rect.x, rect.y, rect.width, rect.height, 4, GxEPD_RED);
+    drawDashboardFrame(rect);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     u8g2Fonts.setFont(FONT_TEXT);
@@ -1001,7 +1008,7 @@ static void drawDashboardWeather(const dashboard::Snapshot& snapshot, const dash
         u8g2Fonts.setFont(FONT_TEXT);
         u8g2Fonts.drawUTF8(unitX, rect.y + 51, "°C");
     } else {
-        const String temperature = String(snapshot.weather.tempMinC.value) + "–"
+        const String temperature = String(snapshot.weather.tempMinC.value) + "-"
             + String(snapshot.weather.tempMaxC.value) + "°C";
         u8g2Fonts.setFont(FONT_TEXT);
         u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 51, temperature.c_str());
@@ -1010,7 +1017,7 @@ static void drawDashboardWeather(const dashboard::Snapshot& snapshot, const dash
     u8g2Fonts.setFont(FONT_SUB);
     String range;
     if (snapshot.weather.tempC.hasValue && hasRange) {
-        range = "今日 " + String(snapshot.weather.tempMinC.value) + "–"
+        range = "今日 " + String(snapshot.weather.tempMinC.value) + "-"
             + String(snapshot.weather.tempMaxC.value) + "°C";
     }
     if (snapshot.weather.tempC.hasValue && snapshot.weather.observedAt.length() >= 16) {
@@ -1056,7 +1063,7 @@ static void drawDashboardUsage(const dashboard::UsageData* usage, const dashboar
 }
 
 static void drawDashboardFocus(const dashboard::Snapshot& snapshot, const dashboard::Rect& rect) {
-    display.drawFastVLine(rect.x, rect.y + 3, rect.height - 6, GxEPD_RED);
+    display.fillRect(rect.x, rect.y + 3, 3, rect.height - 6, GxEPD_RED);
     u8g2Fonts.setFont(FONT_TEXT);
     u8g2Fonts.setForegroundColor(GxEPD_BLACK);
     const String focus = snapshot.focus.type == "connection_error" ? snapshot.focus.text
@@ -1140,6 +1147,48 @@ static void draw_daily_brief(int16_t baselineY) {
     wordText = clipUtf8ToWidth(wordText, 116);
     const int16_t wordX = display.width() - 3 - u8g2Fonts.getUTF8Width(wordText.c_str());
     u8g2Fonts.drawUTF8(wordX, baselineY, wordText.c_str());
+}
+
+static void drawCalendarBottom(const dashboard::Snapshot& snapshot, bool offline) {
+    const int16_t x = 8;
+    const int16_t y = CALENDAR_PANEL_HEIGHT + 9;
+    const int16_t width = display.width() - 16;
+    display.drawFastHLine(x, CALENDAR_PANEL_HEIGHT + 3, width, GxEPD_RED);
+    display.drawRoundRect(x, y, width, 43, 4, GxEPD_RED);
+    u8g2Fonts.setFont(FONT_TEXT);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    u8g2Fonts.drawUTF8(x + 10, y + 16, "天气");
+
+    const dashboard::WeatherData& weather = snapshot.weather;
+    const bool sameDay = snapshot.localDate.length() == 10
+        && snapshot.localDate.substring(0, 10) == String(tmInfo.tm_year + 1900) + "-"
+            + (tmInfo.tm_mon + 1 < 10 ? "0" : "") + String(tmInfo.tm_mon + 1) + "-"
+            + (tmInfo.tm_mday < 10 ? "0" : "") + String(tmInfo.tm_mday);
+    String primary = "暂无今日天气";
+    if (sameDay && weather.tempC.hasValue) primary = String(weather.tempC.value) + "°C";
+    else if (sameDay && weather.tempMinC.hasValue && weather.tempMaxC.hasValue) {
+        primary = String(weather.tempMinC.value) + "-" + String(weather.tempMaxC.value) + "°C";
+    }
+    u8g2Fonts.drawUTF8(x + 10, y + 36, primary.c_str());
+    String detail = offline ? "离线缓存" : weather.locationName;
+    if (detail.isEmpty()) detail = "未配置位置";
+    if (detail == "101010100") detail = "北京";
+    if (!weather.condition.isEmpty() && sameDay) detail += " " + weather.condition;
+    if (sameDay && weather.tempMinC.hasValue && weather.tempMaxC.hasValue) {
+        detail += " 今日" + String(weather.tempMinC.value) + "-"
+            + String(weather.tempMaxC.value) + "°C";
+    }
+    u8g2Fonts.drawUTF8(x + 146, y + 36, clipUtf8ToWidth(detail, width - 158).c_str());
+
+    const int16_t focusY = y + 51;
+    display.fillRect(x, focusY, 3, 25, GxEPD_RED);
+    const String focus = snapshot.focus.text.isEmpty() ? "今日重点：未设置"
+        : "今日重点：" + snapshot.focus.text;
+    u8g2Fonts.drawUTF8(x + 10, focusY + 19,
+                       clipUtf8ToWidth(focus, width - 114).c_str());
+    const char* hint = "单击返回";
+    u8g2Fonts.drawUTF8(x + width - u8g2Fonts.getUTF8Width(hint), focusY + 19, hint);
 }
 
 // Compact calendar with Gregorian day and lunar/solar-term label in every cell.
@@ -1604,8 +1653,7 @@ void task_screen(void* param) {
     do {
         display.fillScreen(GxEPD_WHITE);
         draw_compact_calendar();
-        display.drawFastHLine(0, CALENDAR_PANEL_HEIGHT + 5, display.width(), GxEPD_BLACK);
-        draw_daily_brief(CALENDAR_PANEL_HEIGHT + 28);
+        drawCalendarBottom(dashboardSnapshot, dashboardOffline);
     } while (display.nextPage());
 
     int32_t _calendar_date = (tmInfo.tm_year + 1900) * 10000 + (tmInfo.tm_mon + 1) * 100 + tmInfo.tm_mday;
@@ -1658,8 +1706,10 @@ void task_dashboard_screen(void* param) {
     vTaskDelete(NULL);
 }
 
-void si_screen() {
+void si_screen(const dashboard::Snapshot& snapshot, bool offline) {
     _screen_status = 0;
+    dashboardSnapshot = snapshot;
+    dashboardOffline = offline;
     si_calendar(); // 准备日历数据
 
     if (si_calendar_status() == 2) {
