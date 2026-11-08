@@ -6,6 +6,7 @@
 #include <deepseek.h>
 #include <daily_brief.h>
 #include <dashboard_renderer.h>
+#include <panel_admin.h>
 #include "holiday.h"
 #include "nongli.h"
 
@@ -1071,20 +1072,13 @@ static void drawDashboardFocus(const dashboard::Snapshot& snapshot, const dashbo
     u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 24, clipUtf8ToWidth(focus, rect.width - 12).c_str());
 }
 
-static void drawDashboardStatus(const dashboard::Snapshot& snapshot, const dashboard::Rect& rect, bool offline) {
+static void drawDashboardStatus(const dashboard::Rect& rect) {
     u8g2Fonts.setFont(FONT_SUB);
-    u8g2Fonts.setForegroundColor(offline ? GxEPD_RED : GxEPD_BLACK);
-    String value;
-    if (tmInfo.tm_year + 1900 >= 2020) {
-        char timeText[6];
-        snprintf(timeText, sizeof(timeText), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
-        value = "画面 " + String(timeText) + " · ";
-    }
-    value += dashboard::snapshotStateLabel(snapshot, offline);
-    u8g2Fonts.drawUTF8(rect.x, rect.y + 12, clipUtf8ToWidth(value, rect.width).c_str());
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    u8g2Fonts.drawUTF8(rect.x, rect.y + 12, "单击月历 · 双击配置");
 }
 
-static void drawDashboardHome(const dashboard::Snapshot& snapshot, bool offline) {
+static void drawDashboardHome(const dashboard::Snapshot& snapshot) {
     const dashboard::HomeLayout layout = dashboard::homeLayout();
     if (!dashboard::layoutFits400x300(layout)) return;
     drawDashboardDate(snapshot, layout.date);
@@ -1107,13 +1101,72 @@ static void drawDashboardHome(const dashboard::Snapshot& snapshot, bool offline)
             ? dashboard::formatTokenCount(deepseek->totalTokens.value) : "暂未接入";
         u8g2Fonts.drawUTF8(rect.x + 244, rect.y + 68,
                            clipUtf8ToWidth(tokens, rect.width - 254).c_str());
-        u8g2Fonts.drawUTF8(rect.x + 10, rect.y + 92, "单击月历 · 双击配置");
     } else {
         drawDashboardUsage(openai, layout.openai, "OpenAI", false);
         drawDashboardUsage(deepseek, layout.deepseek, "DeepSeek", true);
     }
     drawDashboardFocus(snapshot, layout.focus);
-    drawDashboardStatus(snapshot, layout.status, offline);
+    drawDashboardStatus(layout.status);
+}
+
+static void drawLocalPanel(const panel::Config& config) {
+    const bool clockValid = tmInfo.tm_year + 1900 >= 2020;
+    const bool courses = config.layout == panel::Layout::Courses;
+    u8g2Fonts.setFont(FONT_TEXT);
+    u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+    u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+    char date[32];
+    if (clockValid) {
+        snprintf(date, sizeof(date), "%d月%d日 周%s", tmInfo.tm_mon + 1, tmInfo.tm_mday,
+                 week_str[tmInfo.tm_wday].c_str());
+    } else {
+        snprintf(date, sizeof(date), "时间未校准");
+    }
+    u8g2Fonts.drawUTF8(8, 29, date);
+    display.drawFastHLine(8, 39, 384, GxEPD_BLACK);
+    display.drawFastHLine(8, 38, 72, GxEPD_RED);
+    u8g2Fonts.drawUTF8(10, 64, courses ? "今日课程" : "待办清单");
+    display.drawRoundRect(8, 77, 384, 202, 4, GxEPD_RED);
+    display.drawRoundRect(9, 78, 382, 200, 4, GxEPD_RED);
+
+    const uint8_t today = tmInfo.tm_wday == 0 ? 7 : tmInfo.tm_wday;
+    uint8_t total = 0;
+    if (courses && clockValid) {
+        for (uint8_t i = 0; i < config.courseCount; ++i) {
+            if (config.courses[i].day == today) ++total;
+        }
+    } else if (!courses) {
+        for (uint8_t i = 0; i < config.taskCount; ++i) {
+            if (!config.tasks[i].done) ++total;
+        }
+    }
+    const String count = courses ? String(total) + " 节" : String(total) + " 项未完成";
+    u8g2Fonts.drawUTF8(390 - u8g2Fonts.getUTF8Width(count.c_str()), 64, count.c_str());
+
+    if (courses && !clockValid) {
+        u8g2Fonts.drawUTF8(23, 113, "请连接网络校时后显示课程");
+    } else if (total == 0) {
+        u8g2Fonts.drawUTF8(23, 113, courses ? "今天没有课程" : "今天的待办已完成");
+    } else {
+        const uint8_t shown = total > 8 ? 7 : total;
+        uint8_t row = 0;
+        for (uint8_t i = 0; i < (courses ? config.courseCount : config.taskCount) && row < shown; ++i) {
+            const String* text = nullptr;
+            if (courses && config.courses[i].day == today) text = &config.courses[i].text;
+            if (!courses && !config.tasks[i].done) text = &config.tasks[i].text;
+            if (text == nullptr) continue;
+            const int16_t baseline = 105 + row * 22;
+            display.fillCircle(23, baseline - 4, 2, GxEPD_RED);
+            u8g2Fonts.drawUTF8(34, baseline, clipUtf8ToWidth(*text, 342).c_str());
+            ++row;
+        }
+        if (total > 8) {
+            const String overflow = courses ? String("共 ") + total + " 节课程"
+                : String("共 ") + total + " 条未完成";
+            u8g2Fonts.drawUTF8(34, 105 + 7 * 22, overflow.c_str());
+        }
+    }
+    u8g2Fonts.drawUTF8(8, 295, "双击配置 · 单击月历");
 }
 
 static String compactWeatherText() {
@@ -1687,6 +1740,8 @@ void task_dashboard_screen(void* param) {
     time_t now = 0;
     time(&now);
     if (now >= 1577836800) localtime_r(&now, &tmInfo);
+    panel::Config panelConfig;
+    panel::load(panelConfig);
 
     delay(100);
     display.init(115200);
@@ -1696,7 +1751,8 @@ void task_dashboard_screen(void* param) {
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
-        drawDashboardHome(dashboardSnapshot, dashboardOffline);
+        if (panelConfig.layout == panel::Layout::Dashboard) drawDashboardHome(dashboardSnapshot);
+        else drawLocalPanel(panelConfig);
     } while (display.nextPage());
     display.powerOff();
     display.hibernate();
@@ -1736,6 +1792,36 @@ void si_dashboard(const dashboard::Snapshot& snapshot, bool offline) {
         SCREEN_HANDLER = NULL;
         _screen_status = 2;
     }
+}
+
+void si_ble_pairing_screen(uint32_t passkey) {
+    char pin[7];
+    snprintf(pin, sizeof(pin), "%06lu", static_cast<unsigned long>(passkey));
+    display.init(115200);
+    display.setRotation(ROTATION);
+    u8g2Fonts.begin(display);
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRoundRect(8, 8, 384, 284, 5, GxEPD_RED);
+        display.drawRoundRect(10, 10, 380, 280, 5, GxEPD_RED);
+        u8g2Fonts.setFont(FONT_TEXT);
+        u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+        u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
+        u8g2Fonts.drawUTF8(28, 52, "蓝牙配置 J-Calendar Config");
+        u8g2Fonts.drawUTF8(28, 94, "连接时输入配对码");
+        display.setFont(nullptr);
+        display.setTextColor(GxEPD_BLACK);
+        display.setTextSize(5);
+        display.setCursor(57, 132);
+        display.print(pin);
+        display.setTextSize(1);
+        u8g2Fonts.drawUTF8(28, 238, "长按/双击进入，有效 15 分钟");
+        u8g2Fonts.drawUTF8(28, 270, "保存后自动刷新墨水屏");
+    } while (display.nextPage());
+    display.powerOff();
+    display.hibernate();
 }
 
 int si_screen_status() {

@@ -4,8 +4,11 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <atomic>
+#include <cstring>
 
 #include "_preference.h"
+#include "panel_admin.h"
 
 namespace {
 constexpr char DEVICE_NAME[] = "J-Calendar Config";
@@ -13,11 +16,19 @@ constexpr char SERVICE_UUID[] = "1d8b0c01-95b2-4fe8-b74d-8db8f9937e01";
 constexpr char CONFIG_UUID[] = "1d8b0c02-95b2-4fe8-b74d-8db8f9937e01";
 constexpr char VERSION_UUID[] = "1d8b0c03-95b2-4fe8-b74d-8db8f9937e01";
 constexpr uint8_t FRAME_SET = 0x01, FRAME_NOTIFY = 0x02, FRAME_START = 0x01, FRAME_END = 0x02;
-constexpr size_t FRAME_MAX = 180;
+// Default ATT MTU is 23 bytes. Notifications have a 20-byte value limit,
+// including the two protocol bytes; do not assume the central raised the MTU.
+constexpr size_t FRAME_MAX = 18;
+constexpr size_t REQUEST_MAX = 4096;
 
 NimBLECharacteristic* configCharacteristic = nullptr;
-String received;
-bool active = false, activity = false, restart = false;
+char received[REQUEST_MAX + 1] = {};
+size_t receivedLength = 0;
+std::atomic<bool> requestReady{false};
+bool active = false;
+std::atomic<bool> activity{false};
+std::atomic<bool> restart{false};
+std::atomic<bool> stopping{false};
 uint32_t passkey = 0;
 
 String normalizedHost(String host) {
@@ -57,13 +68,18 @@ void reply(const JsonDocument& doc) {
         frame += static_cast<char>(FRAME_NOTIFY);
         frame += static_cast<char>((pos == 0 ? FRAME_START : 0) | (pos + length == json.length() ? FRAME_END : 0));
         frame += json.substring(pos, pos + length);
-        configCharacteristic->setValue(frame.c_str());
-        configCharacteristic->notify();
+        // Middle frames have a zero flag byte; C-string setValue would truncate
+        // them before the JSON payload. Send the exact binary frame length.
+        if (!configCharacteristic->notify(
+                reinterpret_cast<const uint8_t*>(frame.c_str()), frame.length())) {
+            Serial.println("[BLE] config notification failed");
+            return;
+        }
         delay(15);
     }
 }
 
-void failure(const char* message) {
+void failure(const String& message) {
     JsonDocument doc; doc["ok"] = false; doc["error"] = message; reply(doc);
 }
 
@@ -79,6 +95,38 @@ void readConfig() {
     doc["hasPrivateKey"] = !pref.getString(PREF_QW_JWT_PRIV, "").isEmpty();
     doc["wifiSsid"] = WiFi.SSID(); doc["wifiConnected"] = WiFi.isConnected();
     pref.end(); reply(doc);
+}
+
+void readPanel() {
+    static panel::Config config;
+    if (!panel::load(config)) { failure("Panel storage is invalid"); return; }
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["op"] = "panel";
+    JsonDocument payload;
+    if (deserializeJson(payload, panel::toJson(config))) { failure("Panel serialization failed"); return; }
+    doc["config"] = payload.as<JsonObject>();
+    reply(doc);
+}
+
+void savePanel(JsonDocument& request) {
+    if (!request["config"].is<JsonObject>()) { failure("Panel config is missing"); return; }
+    String json;
+    serializeJson(request["config"], json);
+    String error;
+    if (!panel::save(json, error)) { failure(error); return; }
+    panel::Config saved;
+    if (!panel::load(saved)) { failure("Saved panel cannot be read back"); return; }
+    Preferences pref;
+    if (!pref.begin(PREF_NAMESPACE, false)) { failure("Cannot open device storage"); return; }
+    pref.putUChar(PREF_ACTIVE_PAGE, 0);
+    pref.end();
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["op"] = "panel_saved";
+    doc["layout"] = panel::layoutName(saved.layout);
+    reply(doc);
+    restart = true;
 }
 
 void saveConfig(JsonDocument& request) {
@@ -120,21 +168,37 @@ void saveConfig(JsonDocument& request) {
 }
 
 void process() {
-    JsonDocument request; const DeserializationError error = deserializeJson(request, received); received = "";
+    JsonDocument request;
+    const DeserializationError error = deserializeJson(request, received, receivedLength);
     if (error) { failure("Invalid JSON request"); return; }
     const String op = request["op"] | "";
-    if (op == "get") readConfig(); else if (op == "set") saveConfig(request); else failure("Unsupported operation");
+    if (op == "get") readConfig();
+    else if (op == "set") saveConfig(request);
+    else if (op == "get_panel") readPanel();
+    else if (op == "set_panel") savePanel(request);
+    else failure("Unsupported operation");
 }
 
 class ConfigCallbacks : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo&) override {
+    void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connection) override {
+        if (!connection.isEncrypted() || !connection.isAuthenticated()) {
+            failure("Authenticated pairing required"); return;
+        }
         const std::string value = characteristic->getValue();
         if (value.size() < 2 || static_cast<uint8_t>(value[0]) != FRAME_SET) { failure("Invalid frame"); return; }
+        if (requestReady.load(std::memory_order_acquire)) { failure("Device is busy"); return; }
         activity = true; const uint8_t flags = static_cast<uint8_t>(value[1]);
-        if (flags & FRAME_START) received = "";
-        if (received.length() + value.size() - 2 > 1024) { received = ""; failure("Request is too large"); return; }
-        received.concat(value.data() + 2, value.size() - 2);
-        if (flags & FRAME_END) process();
+        if (flags & FRAME_START) receivedLength = 0;
+        const size_t chunkLength = value.size() - 2;
+        if (receivedLength + chunkLength > REQUEST_MAX) {
+            receivedLength = 0; failure("Request is too large"); return;
+        }
+        memcpy(received + receivedLength, value.data() + 2, chunkLength);
+        receivedLength += chunkLength;
+        if (flags & FRAME_END) {
+            received[receivedLength] = '\0';
+            requestReady.store(true, std::memory_order_release);
+        }
     }
 };
 
@@ -143,23 +207,37 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         activity = true;
         // Trigger passkey pairing immediately so Web Bluetooth does not first
         // encounter an opaque encrypted-characteristic permission error.
-        NimBLEDevice::startSecurity(connection.getConnHandle());
+        int securityResult = 0;
+        const bool securityStarted = NimBLEDevice::startSecurity(connection.getConnHandle(), &securityResult);
+        Serial.printf("[BLE] connected handle=%u security_started=%u rc=%d\n",
+                      connection.getConnHandle(), securityStarted, securityResult);
     }
-    void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override { activity = true; NimBLEDevice::startAdvertising(); }
+    void onDisconnect(NimBLEServer*, NimBLEConnInfo& connection, int reason) override {
+        activity = true;
+        Serial.printf("[BLE] disconnected handle=%u reason=%d\n", connection.getConnHandle(), reason);
+        if (!stopping.load(std::memory_order_acquire)) NimBLEDevice::startAdvertising();
+    }
     uint32_t onPassKeyDisplay() override { return passkey; }
     void onAuthenticationComplete(NimBLEConnInfo& connection) override {
-        if (!connection.isEncrypted()) {
+        Serial.printf("[BLE] authentication handle=%u encrypted=%u authenticated=%u bonded=%u\n",
+                      connection.getConnHandle(), connection.isEncrypted(),
+                      connection.isAuthenticated(), connection.isBonded());
+        if (!connection.isEncrypted() || !connection.isAuthenticated()) {
             NimBLEDevice::getServer()->disconnect(connection.getConnHandle());
-            Serial.println("BLE pairing failed");
+            Serial.println("[BLE] pairing failed; closing unauthenticated connection");
             return;
         }
-        Serial.println("BLE pairing completed");
+        Serial.println("[BLE] pairing completed");
     }
 };
 } // namespace
 
-void bleConfigStart() {
-    if (active) return;
+uint32_t bleConfigStart() {
+    if (active) return passkey;
+    restart = false;
+    stopping = false;
+    receivedLength = 0;
+    requestReady = false;
     passkey = 100000 + (esp_random() % 900000);
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setMTU(247);
@@ -169,10 +247,16 @@ void bleConfigStart() {
     Serial.printf("BLE config advertising as %s; pairing PIN: %06u\n", DEVICE_NAME, passkey);
     NimBLEServer* server = NimBLEDevice::createServer(); server->setCallbacks(new ServerCallbacks());
     NimBLEService* service = server->createService(SERVICE_UUID);
-    configCharacteristic = service->createCharacteristic(CONFIG_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::WRITE_ENC);
+    configCharacteristic = service->createCharacteristic(CONFIG_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::WRITE_AUTHEN);
     configCharacteristic->setCallbacks(new ConfigCallbacks());
     NimBLECharacteristic* version = service->createCharacteristic(VERSION_UUID, NIMBLE_PROPERTY::READ);
     version->setValue("1");
+    if (!server->start()) {
+        Serial.println("BLE config GATT server failed to start");
+        NimBLEDevice::deinit(true);
+        configCharacteristic = nullptr;
+        return 0;
+    }
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
     advertising->enableScanResponse(true);
     advertising->setName(DEVICE_NAME);
@@ -181,14 +265,36 @@ void bleConfigStart() {
         Serial.println("BLE config advertising failed to start");
         NimBLEDevice::deinit(true);
         configCharacteristic = nullptr;
-        return;
+        return 0;
     }
     active = true; activity = true;
+    return passkey;
+}
+
+void bleConfigPoll() {
+    if (!active || !requestReady.load(std::memory_order_acquire)) return;
+    process();
+    receivedLength = 0;
+    requestReady.store(false, std::memory_order_release);
 }
 
 void bleConfigStop() {
     if (!active) return;
-    NimBLEDevice::stopAdvertising(); NimBLEDevice::deinit(true); configCharacteristic = nullptr; received = ""; active = false;
+    stopping.store(true, std::memory_order_release);
+    NimBLEServer* server = NimBLEDevice::getServer();
+    server->advertiseOnDisconnect(false);
+    NimBLEDevice::stopAdvertising();
+    if (server->getConnectedCount() != 0) {
+        // Let the last notification reach the central before closing GATT.
+        delay(300);
+        for (uint16_t handle : server->getPeerDevices()) server->disconnect(handle);
+        const uint32_t started = millis();
+        while (server->getConnectedCount() != 0 && millis() - started < 2000) delay(10);
+    }
+    Serial.printf("[BLE] stopping, remaining connections=%u\n", server->getConnectedCount());
+    NimBLEDevice::deinit(true);
+    configCharacteristic = nullptr;
+    receivedLength = 0; requestReady = false; active = false;
 }
-bool bleConfigTakeActivity() { const bool result = activity; activity = false; return result; }
-bool bleConfigShouldRestart() { return restart; }
+bool bleConfigTakeActivity() { return activity.exchange(false); }
+bool bleConfigShouldRestart() { return restart.load(); }

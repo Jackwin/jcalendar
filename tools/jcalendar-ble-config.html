@@ -1,21 +1,58 @@
 <!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>J-Calendar BLE 配置</title>
-<style>body{font:16px system-ui;margin:20px;max-width:680px}input,textarea,select{box-sizing:border-box;width:100%;margin:4px 0 12px;padding:8px}textarea{height:110px}button{padding:9px 14px;margin:0 8px 12px 0}#log{white-space:pre-wrap;background:#f4f4f4;padding:10px;min-height:44px}</style>
+<style>body{font:16px system-ui;margin:20px auto;padding:0 14px;max-width:680px;background:#f7f4ef;color:#28211e}input,textarea,select{box-sizing:border-box;width:100%;margin:4px 0 12px;padding:10px;font:inherit}textarea{height:110px}button{padding:10px 14px;margin:4px 8px 12px 0;min-height:44px;font:inherit}#log{white-space:pre-wrap;background:#fff;padding:12px;min-height:44px;border:1px solid #e5d5cd;border-radius:8px}.item{display:flex;align-items:center;gap:8px;background:#fff;padding:8px;margin:5px 0;border-radius:8px}.item input{width:auto;margin:0}.item span{flex:1;overflow-wrap:anywhere}.item button{margin:0}.row{display:flex;gap:8px}.row input{flex:1;min-width:0}</style>
 <h2>J-Calendar BLE 配置</h2>
-<p>按住设备按键唤醒并保持约 1.2 秒，看到配置指示后松开；也可以在启动后的短窗口内双击按键。</p>
-<p>串口会显示 6 位 BLE 配对 PIN。网页只通过蓝牙直连设备，不会上传配置。</p>
-<button id="connect">连接设备</button><button id="read" disabled>读取当前配置</button>
+<p>等待屏幕刷新结束后，长按设备按键至少 2 秒并松开（或双击）；约 25～30 秒后墨水屏会显示 6 位蓝牙配对码，配置窗口持续 15 分钟。</p>
+<p>网页只通过蓝牙直连设备，不会上传配置。浏览器须支持 Web Bluetooth，且页面通过本机 localhost 或 HTTPS 打开。</p>
+<button id="connect">连接设备</button><button id="connectAll">搜索附近所有 BLE 设备</button><div id="log">正在检查浏览器蓝牙支持…</div>
+<p>点击后应弹出浏览器自带的设备选择器，设备列表不会直接显示在本页。若没有弹窗，请改用电脑上的 Chrome 打开本机地址；若弹窗为空，确认设备此刻仍显示配对码。</p>
+<details><summary>Wi-Fi 与天气设置（可选）</summary><button id="read" disabled>读取当前配置</button>
 <label>Wi-Fi SSID<input id="wifiSsid" maxlength="32"></label><label>Wi-Fi 密码（留空不改）<input id="wifiPassword" type="password" maxlength="63"></label>
 <hr><label>API Host<input id="host" maxlength="63"></label><label>位置<input id="location" maxlength="63" placeholder="101010100 或 116.41,39.92"></label>
 <label>天气类型<select id="type"><option value="0">每日天气</option><option value="1">实时天气 + 三日预报</option></select></label>
 <label>JWT Credential ID（kid）<input id="kid" maxlength="63"></label><label>JWT Project ID（sub）<input id="sub" maxlength="63"></label>
-<label>Ed25519 PKCS#8 PEM 私钥（留空不改）<textarea id="privateKey"></textarea></label><button id="save" disabled>保存并重启设备</button><div id="log">正在检查浏览器蓝牙支持…</div>
+<label>Ed25519 PKCS#8 PEM 私钥（留空不改）<textarea id="privateKey"></textarea></label><button id="save" disabled>保存并重启设备</button></details>
+<hr><h3>墨水屏模板</h3>
+<p>选择日常看板、今日课程或待办清单；保存后设备立即刷新首页。课程和待办断网仍保留。</p>
+<button id="readPanel" disabled>读取模板</button>
+<label>显示模板<select id="layout"><option value="dashboard">日常看板</option><option value="courses">今日课程</option><option value="tasks">待办清单</option></select></label>
+<h4>待办 <span id="taskCount">0 / 12</span></h4><div id="taskList"></div>
+<div class="row"><input id="taskText" maxlength="60" placeholder="新增待办"><button id="addTask">添加</button></div>
+<h4>课程 <span id="courseCount">0 / 35</span></h4>
+<label>星期<select id="courseDay"><option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option></select></label>
+<div id="courseList"></div><div class="row"><input id="courseText" maxlength="60" placeholder="08:00 数学 A101"><button id="addCourse">添加</button></div>
+<button id="savePanel" disabled>保存模板并刷新墨水屏</button>
 <script>
-const serviceUuid='1d8b0c01-95b2-4fe8-b74d-8db8f9937e01',configUuid='1d8b0c02-95b2-4fe8-b74d-8db8f9937e01';let c,incoming=[];const $=id=>document.getElementById(id),log=s=>$('log').textContent=s,enc=new TextEncoder(),dec=new TextDecoder();
-async function send(o){const d=enc.encode(JSON.stringify(o));for(let i=0;i<d.length;i+=180){const p=d.slice(i,i+180),f=(i?0:1)|(i+p.length===d.length?2:0),x=new Uint8Array(p.length+2);x[0]=1;x[1]=f;x.set(p,2);await c.writeValueWithResponse(x)}}
-function received(e){try{const v=new Uint8Array(e.target.value.buffer),f=v[1];if(v[0]!==2)return;if(f&1)incoming=[];incoming.push(v.slice(2));if(!(f&2))return;const n=incoming.reduce((a,x)=>a+x.length,0),all=new Uint8Array(n);let p=0;incoming.forEach(x=>{all.set(x,p);p+=x.length});const r=JSON.parse(dec.decode(all));if(!r.ok){log('设备错误：'+r.error);return}if(r.op==='config'){['host','location','kid','sub','wifiSsid'].forEach(k=>$(k).value=r[k]||'');$('type').value=String(r.type||0);log('已读取当前配置。Wi-Fi 密码和JWT私钥不会从设备回传。')}else if(r.op==='saved')log('已保存，设备正在重启。')}catch(e){log('解析设备响应失败：'+e.message)}}
-$('connect').onclick=async()=>{try{if(!navigator.bluetooth)throw new Error('当前浏览器不支持 Web Bluetooth，请使用支持该功能的 Chrome 或 Edge');log('正在搜索配置服务，请确认设备已进入 BLE 配置模式…');const d=await navigator.bluetooth.requestDevice({filters:[{services:[serviceUuid]}],optionalServices:[serviceUuid]});d.addEventListener('gattserverdisconnected',()=>{c=undefined;$('read').disabled=$('save').disabled=true;log('设备已断开')});const g=await d.gatt.connect(),s=await g.getPrimaryService(serviceUuid);c=await s.getCharacteristic(configUuid);await c.startNotifications();c.addEventListener('characteristicvaluechanged',received);$('read').disabled=$('save').disabled=false;log('已连接：'+(d.name||'J-Calendar')+'；正在读取配置…');await send({op:'get'})}catch(e){log('连接失败：'+e.message)}};
+const serviceUuid='1d8b0c01-95b2-4fe8-b74d-8db8f9937e01',configUuid='1d8b0c02-95b2-4fe8-b74d-8db8f9937e01';let c,incoming=[],saveConfirmed=false,saveRejected=false,panel={version:1,layout:'dashboard',tasks:[],courses:[]};const $=id=>document.getElementById(id),log=s=>$('log').textContent=s,enc=new TextEncoder(),dec=new TextDecoder();
+// A default ATT MTU of 23 permits only 20 bytes per write, including our 2-byte header.
+// Chrome does not expose the negotiated MTU, so use the universally safe payload size.
+async function send(o){if(!c)throw Error('蓝牙未连接');const d=enc.encode(JSON.stringify(o)),chunkSize=18;for(let i=0;i<d.length;i+=chunkSize){const p=d.slice(i,i+chunkSize),f=(i?0:1)|(i+p.length===d.length?2:0),x=new Uint8Array(p.length+2);x[0]=1;x[1]=f;x.set(p,2);await c.writeValueWithResponse(x)}}
+const button=(name,fn)=>{const b=document.createElement('button');b.type='button';b.textContent=name;b.onclick=fn;return b};
+const valid=t=>t.length>0&&enc.encode(t).length<=60;
+function renderPanel(){ $('layout').value=panel.layout;$('taskCount').textContent=panel.tasks.length+' / 12';$('courseCount').textContent=panel.courses.length+' / 35';$('taskList').replaceChildren();panel.tasks.forEach((task,i)=>{const row=document.createElement('div');row.className='item';const box=document.createElement('input');box.type='checkbox';box.checked=task.done;box.onchange=()=>task.done=box.checked;const label=document.createElement('span');label.textContent=task.text;row.append(box,label,button('删除',()=>{panel.tasks.splice(i,1);renderPanel()}));$('taskList').append(row)});$('courseList').replaceChildren();panel.courses.forEach((course,i)=>{if(course.day!==+$('courseDay').value)return;const row=document.createElement('div');row.className='item';const label=document.createElement('span');label.textContent=course.text;row.append(label,button('删除',()=>{panel.courses.splice(i,1);renderPanel()}));$('courseList').append(row)})}
+function received(e){try{const data=e.target.value,v=new Uint8Array(data.buffer,data.byteOffset,data.byteLength),f=v[1];if(v[0]!==2)return;if(f&1)incoming=[];incoming.push(v.slice(2));if(!(f&2))return;const n=incoming.reduce((a,x)=>a+x.length,0),all=new Uint8Array(n);let p=0;incoming.forEach(x=>{all.set(x,p);p+=x.length});const r=JSON.parse(dec.decode(all));if(!r.ok){saveRejected=true;log('设备拒绝保存：'+r.error);return}if(r.op==='config'){['host','location','kid','sub','wifiSsid'].forEach(k=>$(k).value=r[k]||'');$('type').value=String(r.type||0);log('已读取当前配置。Wi-Fi 密码和JWT私钥不会从设备回传。')}else if(r.op==='panel'){if(!r.config||!Array.isArray(r.config.tasks)||!Array.isArray(r.config.courses))throw Error('模板数据无效');panel=r.config;renderPanel();log('已读取墨水屏模板')}else if(r.op==='panel_saved'){saveConfirmed=true;const name={dashboard:'日常看板',courses:'今日课程',tasks:'待办清单'}[r.layout]||r.layout||'未知';saveRejected=r.layout!==$('layout').value;log(saveRejected?'设备保存的是“'+name+'”，与当前选择不一致；请重新连接读取模板。':'设备确认已保存“'+name+'”模板；蓝牙断开后将刷新墨水屏，约需 25～30 秒。')}else if(r.op==='saved'){saveConfirmed=true;log('设备确认配置已保存，即将退出配置模式。')}}catch(e){log('解析设备响应失败：'+e.message)}}
+async function connect(showAll){let phase='选择设备';try{
+  saveConfirmed=false;saveRejected=false;
+  if(!navigator.bluetooth)throw new Error('当前浏览器不支持 Web Bluetooth，请使用支持该功能的 Chrome');
+  log(showAll?'正在打开浏览器设备选择器，请选择 J-Calendar Config…':'正在按配置服务筛选设备，请确认墨水屏显示配对码…');
+  const options=showAll?{acceptAllDevices:true,optionalServices:[serviceUuid]}:{filters:[{services:[serviceUuid]}],optionalServices:[serviceUuid]};
+  const d=await navigator.bluetooth.requestDevice(options);
+  d.addEventListener('gattserverdisconnected',()=>{c=undefined;$('read').disabled=$('save').disabled=$('readPanel').disabled=$('savePanel').disabled=true;if(!saveRejected)log(saveConfirmed?'设备已确认保存并断开蓝牙，正在退出配置模式；请等待墨水屏实际刷新。':'设备在“'+phase+'”阶段断开，保存未获设备确认；请重新连接并读取模板核对。')});
+  phase='建立 GATT 连接';log('已选择 '+(d.name||'蓝牙设备')+'，正在建立连接…');
+  const g=await d.gatt.connect();phase='发现配置服务';log('蓝牙已连接，正在发现配置服务…');
+  const s=await g.getPrimaryService(serviceUuid);phase='发现配置特征';
+  c=await s.getCharacteristic(configUuid);phase='订阅通知';
+  await c.startNotifications();c.addEventListener('characteristicvaluechanged',received);
+  $('read').disabled=$('save').disabled=$('readPanel').disabled=$('savePanel').disabled=false;
+  phase='读取模板（需要 PIN 配对）';log('GATT 已就绪，正在请求配对并读取模板…');
+  await send({op:'get_panel'});phase='已连接';
+}catch(e){if(e.name==='NotSupportedError'||String(e.message).includes('Unsupported device'))log('当前内置浏览器不支持打开系统 BLE 设备选择器。请用电脑上的 Google Chrome 打开 http://127.0.0.1:8766/jcalendar-ble-config.html 再搜索。');else if(e.name==='NotFoundError')log('没有选中设备：选择器被关闭，或没有扫描到 J-Calendar Config。请确认墨水屏仍显示配对码。');else log('连接失败，阶段：'+phase+'；'+e.name+'：'+e.message)}}
+$('connect').onclick=()=>connect(false);$('connectAll').onclick=()=>connect(true);
 $('read').onclick=()=>send({op:'get'});$('save').onclick=()=>{const r={op:'set',host:$('host').value,location:$('location').value,type:+$('type').value,kid:$('kid').value,sub:$('sub').value};if($('privateKey').value.trim())r.privateKey=$('privateKey').value;if($('wifiSsid').value.trim()){r.wifiSsid=$('wifiSsid').value;r.wifiPassword=$('wifiPassword').value}send(r)};
-if(navigator.bluetooth){navigator.bluetooth.getAvailability().then(ok=>log(ok?'浏览器蓝牙可用。请先让设备进入配置模式，再点击“连接设备”。':'浏览器未检测到可用蓝牙，请检查系统蓝牙和浏览器权限。')).catch(e=>log('蓝牙检查失败：'+e.message))}else log('当前浏览器不支持 Web Bluetooth，请使用支持该功能的 Chrome 或 Edge。');
+$('readPanel').onclick=()=>send({op:'get_panel'});$('layout').onchange=()=>panel.layout=$('layout').value;$('courseDay').onchange=renderPanel;
+$('addTask').onclick=()=>{const text=$('taskText').value.trim();if(!valid(text)){log('待办须为 1～60 UTF-8 字节');return}if(panel.tasks.length>=12){log('待办最多 12 条');return}panel.tasks.push({text,done:false});$('taskText').value='';renderPanel()};
+$('addCourse').onclick=()=>{const text=$('courseText').value.trim();if(!valid(text)){log('课程须为 1～60 UTF-8 字节');return}if(panel.courses.length>=35){log('课程最多 35 条');return}panel.courses.push({day:+$('courseDay').value,text});$('courseText').value='';renderPanel()};
+$('savePanel').onclick=async()=>{try{panel.layout=$('layout').value;const request={op:'set_panel',config:panel};if(enc.encode(JSON.stringify(request)).length>4096)throw Error('配置过大，请缩短内容');saveConfirmed=false;saveRejected=false;log('正在分片写入“'+$('layout').selectedOptions[0].text+'”模板，请保持连接…');await send(request);if(!saveConfirmed&&!saveRejected)log('模板已发送，等待设备确认保存…')}catch(e){log('保存失败：'+e.message)}};renderPanel();
+if(navigator.bluetooth){navigator.bluetooth.getAvailability().then(ok=>log(ok?'浏览器提供蓝牙接口；这不代表 J-Calendar 正在广播。请先进入配置模式，再点击“连接设备”。':'浏览器未检测到可用蓝牙，请检查系统蓝牙和浏览器权限。')).catch(e=>log('蓝牙检查失败：'+e.message))}else log('当前浏览器不支持 Web Bluetooth，请使用电脑上的 Chrome。');
 </script>

@@ -1,12 +1,17 @@
 #include "refresh_scheduler.h"
 
 #include <algorithm>
+#include <vector>
 
 namespace dashboard {
 namespace {
 
 constexpr time_t MIN_VALID_TIME = 1577836800; // 2020-01-01
 constexpr uint32_t FALLBACK_SECONDS = 2 * 60 * 60;
+
+static bool isValidMinuteOfDay(int minuteOfDay) {
+    return minuteOfDay >= 0 && minuteOfDay < 24 * 60;
+}
 
 time_t localCandidate(const struct tm& base, int dayOffset, int minuteOfDay) {
     struct tm candidate = base;
@@ -20,16 +25,26 @@ time_t localCandidate(const struct tm& base, int dayOffset, int minuteOfDay) {
 
 uint32_t secondsUntilSchedule(time_t now, const int* minutes, size_t count) {
     struct tm local = {};
-    localtime_r(&now, &local);
+    if (localtime_r(&now, &local) == nullptr) return FALLBACK_SECONDS;
+
+    std::vector<int> sorted;
+    sorted.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (isValidMinuteOfDay(minutes[i])) sorted.push_back(minutes[i]);
+    }
+    if (sorted.empty()) return FALLBACK_SECONDS;
+    std::sort(sorted.begin(), sorted.end());
+
     time_t best = 0;
     for (int dayOffset = 0; dayOffset <= 1; ++dayOffset) {
-        for (size_t i = 0; i < count; ++i) {
-            const time_t candidate = localCandidate(local, dayOffset, minutes[i]);
+        for (int minuteOfDay : sorted) {
+            const time_t candidate = localCandidate(local, dayOffset, minuteOfDay);
+            if (candidate == static_cast<time_t>(-1)) continue;
             if (candidate > now && (best == 0 || candidate < best)) best = candidate;
         }
     }
-    if (best <= now) return FALLBACK_SECONDS;
-    const uint64_t seconds = static_cast<uint64_t>(best - now) + 5;
+    if (best == 0 || best <= now) return FALLBACK_SECONDS;
+    const uint64_t seconds = static_cast<uint64_t>(best - now) + 5ULL;
     return static_cast<uint32_t>(std::min<uint64_t>(seconds, 24ULL * 60ULL * 60ULL));
 }
 

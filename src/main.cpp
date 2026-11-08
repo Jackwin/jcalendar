@@ -7,14 +7,19 @@
 #include <WiFiManager.h>
 
 #include "driver/gpio.h"
+#if !CONFIG_IDF_TARGET_ESP32C3
+#include "driver/rtc_io.h"
+#endif
 #include "esp_sleep.h"
 
 #include "_preference.h"
 #include "_sntp.h"
+#include "ble_config.h"
 #include "dashboard_cache.h"
 #include "dashboard_client.h"
 #include "local_dashboard.h"
 #include "led.h"
+#include "panel_admin.h"
 #include "refresh_scheduler.h"
 #include "screen_ink.h"
 #include "version.h"
@@ -27,7 +32,7 @@ constexpr uint32_t SNTP_WAIT_MS = SNTP_SYNC_TIMEOUT_MS + 1000;
 constexpr uint32_t SCREEN_WAIT_MS = 120000;
 constexpr uint32_t BUTTON_RELEASE_WAIT_MS = 2000;
 constexpr uint32_t GESTURE_WINDOW_MS = 4500;
-constexpr uint32_t CONFIG_WINDOW_MS = 180000;
+constexpr uint32_t CONFIG_WINDOW_MS = 15UL * 60UL * 1000UL;
 constexpr uint16_t CONFIG_VERSION = 1;
 constexpr uint8_t PAGE_COUNT = 2;
 constexpr uint8_t PAGE_DASHBOARD = 0;
@@ -50,7 +55,8 @@ Gesture gesture = Gesture::None;
 
 void onClick() { gesture = Gesture::NextPage; }
 void onDoubleClick() { gesture = Gesture::Configure; }
-void onLongPress() { gesture = Gesture::ManualRefresh; }
+void onLongPress() { gesture = Gesture::Configure; }
+void onMultiClick() { gesture = Gesture::ManualRefresh; }
 
 void migratePreferences() {
     Preferences preferences;
@@ -106,23 +112,35 @@ String configuredFocus() {
 Gesture detectWakeGesture() {
     const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
 #if CONFIG_IDF_TARGET_ESP32C3
-    if (wakeCause != ESP_SLEEP_WAKEUP_GPIO) return Gesture::None;
+    const bool buttonWake = wakeCause == ESP_SLEEP_WAKEUP_GPIO;
 #else
-    if (wakeCause != ESP_SLEEP_WAKEUP_EXT0) return Gesture::None;
+    const bool buttonWake = wakeCause == ESP_SLEEP_WAKEUP_EXT0;
+    // EXT0 leaves its pad in RTC IO mode. OneButton reads the digital GPIO,
+    // so restore the normal GPIO function before sampling the held key.
+    if (wakeCause != ESP_SLEEP_WAKEUP_UNDEFINED) {
+        const esp_err_t pinError = rtc_gpio_deinit(static_cast<gpio_num_t>(KEY_M));
+        if (pinError != ESP_OK) Serial.printf("[Button] RTC GPIO restore failed: %d\n", static_cast<int>(pinError));
+    }
 #endif
+    pinMode(KEY_M, INPUT_PULLUP);
+    const bool pressedAtBoot = digitalRead(KEY_M) == LOW;
+    Serial.printf("[Button] wake=%d level=%d\n", static_cast<int>(wakeCause), digitalRead(KEY_M));
+    // A held button must also work after a power-on or serial reset, not only
+    // after an EXT0/GPIO deep-sleep wake. Ignore ordinary timer boots.
+    if (!buttonWake && !pressedAtBoot) return Gesture::None;
     gesture = Gesture::None;
     modeButton.setDebounceMs(40);
     modeButton.setClickMs(450);
-    modeButton.setPressMs(3000);
+    modeButton.setPressMs(1200);
     modeButton.attachClick(onClick);
     modeButton.attachDoubleClick(onDoubleClick);
+    modeButton.attachMultiClick(onMultiClick);
     modeButton.attachLongPressStart(onLongPress);
-    // EXT0/GPIO wake proves that the button was pressed, even if a short tap
-    // ended while setup() initialized NVS and the LED. Seed OneButton with
-    // that first press so a released wake tap is not silently discarded.
+    // A button wake proves the first press even if it ended during setup.
+    // Likewise seed a held button observed on a non-button boot.
     const uint32_t seedStarted = millis();
     do {
-        modeButton.tick(true);
+        modeButton.tick(buttonWake || pressedAtBoot);
         delay(10);
     } while (millis() - seedStarted <= 50);
     const uint32_t started = millis();
@@ -173,8 +191,10 @@ void runConfigurationPortal() {
     factoryResetRequested = false;
 
     WiFi.mode(WIFI_AP_STA);
+    wifiManager.setHostname("J-Calendar");
     WiFi.softAP("J-Calendar-Setup", "JCalendar");
-    Serial.printf("[Config] connect to J-Calendar-Setup; open http://%s (180 second window)\n",
+    if (!wifiManager.getWiFiSSID(true).isEmpty()) WiFi.begin();
+    Serial.printf("[Config] connect to J-Calendar-Setup; open http://%s (15 minute window)\n",
                   WiFi.softAPIP().toString().c_str());
     DNSServer dns;
     dns.start(53, "*", WiFi.softAPIP());
@@ -208,8 +228,50 @@ void runConfigurationPortal() {
             + "<option value='30'" + (configuredInterval == 30 ? " selected" : "") + ">30 分钟</option>"
             + "<option value='60'" + (configuredInterval != 30 ? " selected" : "") + ">60 分钟</option></select><br>"
             + "<button type='submit'>保存并退出</button></form>"
+            + "<p><a href='/panel'>课程表、待办与显示模板</a></p>"
             + "<p><a href='/factory-confirm'>恢复出厂设置（需要再次确认）</a></p></body></html>";
         server.send(200, "text/html; charset=utf-8", page);
+    });
+    server.on("/panel", HTTP_GET, [&]() {
+        server.sendHeader("Cache-Control", "no-store");
+        server.sendHeader("X-Content-Type-Options", "nosniff");
+        server.sendHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'");
+        server.send_P(200, "text/html; charset=utf-8", panel::html());
+    });
+    server.on("/api/panel", HTTP_GET, [&]() {
+        panel::Config config;
+        panel::load(config);
+        server.sendHeader("Cache-Control", "no-store");
+        server.send(200, "application/json; charset=utf-8", panel::toJson(config));
+    });
+    server.on("/api/panel", HTTP_POST, [&]() {
+        if (server.header("X-Panel-Request") != "1") {
+            server.send(403, "application/json; charset=utf-8", "{\"error\":\"缺少面板请求标记\"}");
+            return;
+        }
+        const String body = server.arg("plain");
+        if (body.length() > 3900) {
+            server.send(413, "application/json; charset=utf-8", "{\"error\":\"配置内容过大\"}");
+            return;
+        }
+        String error;
+        if (!panel::save(body, error)) {
+            server.send(400, "application/json; charset=utf-8", String("{\"error\":\"") + error + "\"}");
+            return;
+        }
+        panel::Config saved;
+        if (!panel::load(saved)) {
+            server.send(500, "application/json; charset=utf-8", "{\"error\":\"保存后无法读取模板\"}");
+            return;
+        }
+        Preferences writable;
+        writable.begin(PREF_NAMESPACE, false);
+        writable.putUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+        writable.end();
+        configSaved = true;
+        server.sendHeader("Cache-Control", "no-store");
+        server.send(200, "application/json; charset=utf-8",
+                    String("{\"saved\":true,\"layout\":\"") + panel::layoutName(saved.layout) + "\"}");
     });
     server.on("/save", HTTP_POST, [&]() {
         String dashboardUrl = server.arg("dashboard_url");
@@ -275,14 +337,37 @@ void runConfigurationPortal() {
         server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
         server.send(302, "text/plain", "");
     });
+    const char* panelHeaders[] = {"X-Panel-Request"};
+    server.collectHeaders(panelHeaders, 1);
     server.begin();
+    const uint32_t blePin = bleConfigStart();
+    if (blePin != 0) {
+        // The pairing page is transient and must never be considered the
+        // persisted dashboard/calendar image. If power is lost or the device
+        // resets in this window, the next boot must repaint the normal page.
+        Preferences screenState;
+        if (screenState.begin(PREF_NAMESPACE, false)) {
+            screenState.putUInt(PREF_DASH_HASH, 0);
+            screenState.putUInt(PREF_CAL_HASH, 0);
+            screenState.end();
+        }
+        si_ble_pairing_screen(blePin);
+    }
     const uint32_t started = millis();
+    bool staAddressLogged = false;
     while (!configSaved && !factoryResetRequested && millis() - started < CONFIG_WINDOW_MS) {
         dns.processNextRequest();
         server.handleClient();
+        bleConfigPoll();
+        if (bleConfigShouldRestart()) configSaved = true;
+        if (!staAddressLogged && WiFi.status() == WL_CONNECTED) {
+            Serial.printf("[Config] LAN panel: http://%s/panel\n", WiFi.localIP().toString().c_str());
+            staAddressLogged = true;
+        }
         delay(10);
     }
     server.stop();
+    bleConfigStop();
     dns.stop();
     WiFi.softAPdisconnect(true);
     if (factoryResetRequested) {
@@ -314,7 +399,7 @@ uint32_t fnvAppend(uint32_t hash, const String& value) {
 uint32_t snapshotDisplayHash(const dashboard::Snapshot& snapshot, bool offline, uint8_t page) {
     uint32_t hash = 2166136261UL;
     // A firmware-only layout change must invalidate the persisted e-paper image.
-    hash = fnvAppend(hash, "dashboard-layout-v5");
+    hash = fnvAppend(hash, "dashboard-layout-v8-transient-clear");
     hash = fnvAppend(hash, String(page));
     hash = fnvAppend(hash, String(offline));
     hash = fnvAppend(hash, snapshot.localDate);
@@ -335,6 +420,14 @@ uint32_t snapshotDisplayHash(const dashboard::Snapshot& snapshot, bool offline, 
             + String(static_cast<uint8_t>(usage.balance.status)));
     }
     hash = fnvAppend(hash, snapshot.focus.text);
+    if (page == PAGE_DASHBOARD) {
+        Preferences preferences;
+        preferences.begin(PREF_NAMESPACE, true);
+        if (preferences.isKey(PREF_PANEL_CONFIG)) {
+            hash = fnvAppend(hash, preferences.getString(PREF_PANEL_CONFIG, ""));
+        }
+        preferences.end();
+    }
     return hash;
 }
 
@@ -350,7 +443,7 @@ uint32_t calendarDisplayHash(const dashboard::Snapshot& snapshot, bool offline) 
     const String content = String(date) + preferences.getString(PREF_TODO_LIST, "")
         + preferences.getString(PREF_WORD_LIST, "") + preferences.getString(PREF_SI_WEEK_1ST, "0");
     preferences.end();
-    uint32_t hash = fnvAppend(2166136261UL, "calendar-bottom-v4");
+    uint32_t hash = fnvAppend(2166136261UL, "calendar-bottom-v5-transient-clear");
     hash = fnvAppend(hash, content);
     hash = fnvAppend(hash, snapshot.localDate);
     hash = fnvAppend(hash, snapshot.weather.locationName + snapshot.weather.condition);
@@ -445,12 +538,37 @@ void enterDeepSleep() {
     esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(seconds) * 1000000ULL);
     if (buttonReleasedStable()) {
 #if CONFIG_IDF_TARGET_ESP32C3
-        esp_deep_sleep_enable_gpio_wakeup(1ULL << KEY_M, ESP_GPIO_WAKEUP_GPIO_LOW);
+        const esp_err_t wakeError = esp_deep_sleep_enable_gpio_wakeup(1ULL << KEY_M, ESP_GPIO_WAKEUP_GPIO_LOW);
 #else
-        esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(KEY_M), LOW);
+        const esp_err_t wakeError = esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(KEY_M), LOW);
 #endif
+        if (wakeError != ESP_OK) {
+            Serial.printf("[Sleep] button wake setup failed: %d; retrying in 5 seconds\n", static_cast<int>(wakeError));
+            esp_sleep_enable_timer_wakeup(5ULL * 1000000ULL);
+        } else {
+#if !CONFIG_IDF_TARGET_ESP32C3
+            // Digital INPUT_PULLUP is not the RTC pull-up used by EXT0 in
+            // deep sleep. Keep the released key at a defined HIGH level.
+            const esp_err_t pullDownError = rtc_gpio_pulldown_dis(static_cast<gpio_num_t>(KEY_M));
+            const esp_err_t pullUpError = rtc_gpio_pullup_en(static_cast<gpio_num_t>(KEY_M));
+            if (pullDownError != ESP_OK || pullUpError != ESP_OK) {
+                Serial.printf("[Sleep] RTC button bias failed: down=%d up=%d; retrying in 5 seconds\n",
+                              static_cast<int>(pullDownError), static_cast<int>(pullUpError));
+                esp_sleep_enable_timer_wakeup(5ULL * 1000000ULL);
+            } else {
+                Serial.println("[Sleep] RTC button pull-up enabled");
+                Serial.println("[Sleep] button wake armed");
+            }
+#else
+            Serial.println("[Sleep] button wake armed");
+#endif
+        }
     } else {
-        Serial.println("[Sleep] button still held; external wake disabled for this cycle");
+        // EXT0 is level-triggered: sleeping while the key is low would cause
+        // an immediate wake loop. Retry soon instead of becoming unresponsive
+        // for the full scheduled interval after the key is released.
+        Serial.println("[Sleep] button still held; retrying in 5 seconds");
+        esp_sleep_enable_timer_wakeup(5ULL * 1000000ULL);
     }
 
     gpio_deep_sleep_hold_dis();
@@ -473,7 +591,8 @@ void runMainFlow(Gesture wakeGesture) {
     if (needsWifiSetup) Serial.println("[WiFi] no saved network; opening configuration portal");
     if (wakeGesture == Gesture::Configure || needsWifiSetup) {
         runConfigurationPortal();
-        forceRefresh = configSaved || factoryResetRequested;
+        // Always clear the transient BLE pairing PIN from e-paper.
+        forceRefresh = true;
         if (factoryResetRequested) {
             migratePreferences();
         }
@@ -485,6 +604,16 @@ void runMainFlow(Gesture wakeGesture) {
 
     uint8_t page = activePage();
     if (wakeGesture == Gesture::NextPage) page = advancePage();
+    panel::Config savedPanel;
+    const bool localPanelAfterSave = configSaved && page == PAGE_DASHBOARD
+        && panel::load(savedPanel) && savedPanel.layout != panel::Layout::Dashboard;
+    if (localPanelAfterSave) {
+        // A local course/task template needs no remote data. Fetching weather
+        // and account data here delays the first visible refresh after save.
+        networkAllowed = false;
+        Serial.printf("[Panel] saved %s template; refreshing without network fetch\n",
+                      panel::layoutName(savedPanel.layout));
+    }
     dashboard::Snapshot snapshot;
     const bool cacheAvailable = dashboard::dashboard_cache_load(snapshot);
     bool haveSnapshot = cacheAvailable;
@@ -503,7 +632,7 @@ void runMainFlow(Gesture wakeGesture) {
     const bool wifiConnected = networkAllowed && wifiManager.autoConnect();
     Serial.printf("[WiFi] %s\n", wifiConnected ? "connected" : "unavailable");
     if (networkAllowed && !wifiConnected) {
-        Serial.println("[WiFi] check saved credentials/network; double-click the button after wake to configure");
+        Serial.println("[WiFi] check saved credentials/network; hold or double-click the button after wake to configure");
     }
 
     if (wifiConnected) {

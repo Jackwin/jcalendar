@@ -39,7 +39,7 @@ HTTPS 地址、设备令牌和根证书。配置完整时优先使用聚合服�
 
 ### BLE 配置
 
-按住设备按键唤醒并保持约 1.2 秒，会进入 10 分钟 BLE/Web 配置模式；也可以在启动后的短窗口内双击按键。串口会显示一次性 6 位 BLE 配对 PIN。在仓库根目录运行 `python -m http.server 8000 --directory tools`，再使用支持 Web Bluetooth 的 Chrome 或 Edge 打开 `http://localhost:8000/jcalendar-ble-config.html`。点击连接并在系统提示时输入该 PIN。BLE 使用加密配对，页面可读取 API Host、位置、天气类型、`kid` 和 `sub`，但不会读回 Wi-Fi 密码或 JWT 私钥；填写后保存会自动重启设备。
+按住设备按键唤醒并保持约 1.2 秒，会进入 15 分钟 BLE/Web 配置模式；双击也可进入，三击用于手动刷新。墨水屏会显示一次性 6 位 BLE 配对 PIN。在仓库根目录运行 `python3 -m http.server 8766 --bind 127.0.0.1 --directory tools`，再使用支持 Web Bluetooth 的 Chrome 或 Edge 打开 `http://127.0.0.1:8766/jcalendar-ble-config.html`。点击连接并在系统提示时输入该 PIN。BLE 使用加密配对，页面可读取 API Host、位置、天气类型、`kid` 和 `sub`，但不会读回 Wi-Fi 密码或 JWT 私钥；填写后保存会自动重启设备。
 
 > 和风天气从 2026 年起逐步停止旧的共享域名 `api.qweather.com`，请使用控制台提供的专属 API Host。
 

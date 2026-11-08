@@ -24,6 +24,9 @@ int main() {
     assert(dashboard::nextWakeSeconds(localTime(2026, 10, 18, 23, 59), PowerMode::Balanced) == 365);
     assert(dashboard::nextWakeSeconds(localTime(2026, 10, 18, 12, 31), PowerMode::Saver) == 25145);
     assert(dashboard::nextWakeSeconds(localTime(2026, 10, 18, 10, 14), PowerMode::ExternalPower, 30) == 965);
+    assert(dashboard::nextWakeSeconds(localTime(2026, 10, 18, 7, 0), PowerMode::Balanced) == 7205);
+    assert(dashboard::nextWakeSeconds(localTime(2026, 10, 18, 5, 0), PowerMode::Balanced) == 7205);
+    assert(dashboard::nextWakeSeconds(localTime(2026, 10, 18, 0, 0), PowerMode::Balanced) == 305);
     assert(dashboard::nextWakeSeconds(0, PowerMode::Balanced) == 7200);
     return 0;
 }

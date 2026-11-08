@@ -59,5 +59,6 @@
 #define PREF_DASH_URL "DASH_URL"
 #define PREF_DASH_TOKEN "DASH_TOKEN"
 #define PREF_DASH_CA "DASH_CA"
+#define PREF_PANEL_CONFIG "PANEL_CFG" // Versioned local course/task/layout JSON.
 
 #endif
