@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-17T16:05:00Z",
+  "timezone": "Asia/Shanghai",
+  "local_date": "2026-10-18",
+  "weather": {"status":"ok","source":"qweather","observed_at":"2026-10-17T16:00:00Z","fetched_at":"2026-10-17T16:05:00Z","location_name":"上海","temp_c":18,"temp_min_c":16,"temp_max_c":24,"condition":"多云","condition_code":"101"},
+  "usage": [
+    {"provider":"openai","status":"ok","source":"provider_api","coverage":"organization","completeness":"complete","window_start":"2026-10-17T16:00:00Z","window_end":"2026-10-17T16:05:00Z","fetched_at":"2026-10-17T16:05:00Z","observed_at":null,"input_tokens":0,"output_tokens":0,"total_tokens":0,"balance":null}
+  ],
+  "focus": {"type":"manual","text":"早点休息"},
+  "refresh_after_seconds": 7200
+}

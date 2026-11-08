@@ -1,0 +1,8 @@
+{
+  "name": "jcalendar-openai-usage",
+  "main": "openai_usage_proxy.js",
+  "compatibility_date": "2026-08-15",
+  "secrets": {
+    "required": ["OPENAI_ADMIN_KEY", "DEVICE_TOKEN"]
+  }
+}

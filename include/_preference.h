@@ -11,22 +11,28 @@
 #define PREF_SI_TYPE "SI_TYPE" // 屏幕显示类型
 
 #define PREF_QWEATHER_HOST "QWEATHER_HOST" // QWEATHER HOST
-#define PREF_QWEATHER_KEY "QWEATHER_KEY" // QWEATHER KEY/TOKEN
+#define PREF_QW_JWT_KID "QW_JWT_KID" // JWT Credential ID (kid)
+#define PREF_QW_JWT_SUB "QW_JWT_SUB" // JWT Project ID (sub)
+#define PREF_QW_JWT_PRIV "QW_JWT_PRIV" // Ed25519 PKCS#8 private key
 #define PREF_QWEATHER_TYPE "QWEATHER_TYPE" // 0: 每日天气，1: 实时天气
 #define PREF_QWEATHER_LOC "QWEATHER_LOC" // 地理位置
 #define PREF_CD_DAY_DATE "CD_DAY_DATE" // 倒计日
 #define PREF_CD_DAY_LABLE "CD_DAY_LABLE" // 倒计日名称
 #define PREF_TAG_DAYS "TAG_DAYS" // tag day
 #define PREF_STUDY_SCHEDULE "STUDY_SCH" // 课程表
+#define PREF_TODO_LIST "TODO_LIST" // pipe-separated short to-do items
+#define PREF_WORD_LIST "WORD_LIST" // pipe-separated word=meaning items
 
 // 假期信息，tm年，假期日(int8)，假期日(int8)...
 #define PREF_HOLIDAY "HOLIDAY"
 
 // DeepSeek（显示 token 用量 / 账户余额）
 #define PREF_DS_KEY "DS_KEY"         // DeepSeek API Key
-#define PREF_DS_TODAY_FLASH "DS_TOK_FLASH" // flash 今日累计 token
-#define PREF_DS_TODAY_PRO "DS_TOK_PRO"   // pro 今日累计 token
-#define PREF_DS_DATE "DS_TOK_DATE"   // 今日累计 token 对应的日期 YYYYMMDD
+// Deprecated: values created by the old auto-prompt implementation are not
+// account-wide usage and must never be migrated into dashboard usage.
+#define PREF_DS_TODAY_FLASH "DS_TOK_FLASH"
+#define PREF_DS_TODAY_PRO "DS_TOK_PRO"
+#define PREF_DS_DATE "DS_TOK_DATE"
 
 // 屏幕刷新模式：0=全刷（默认，闪屏），1=LUT差分刷新（无闪屏，快速）
 #define PREF_REFRESH_MODE "REFRESH_MODE"
@@ -35,5 +41,24 @@
 #define PREF_PARTIAL_CNT "PARTIAL_CNT"
 // 今日是否已完成首次全屏刷新 YYYYMMDD
 #define PREF_FULL_DATE "FULL_DATE"
+
+// Dashboard scheduler: 0 balanced, 1 saver, 2 external power.
+#define PREF_POWER_MODE "POWER_MODE"
+#define PREF_EXT_MINUTES "EXT_MINUTES"
+#define PREF_REFRESH_COUNT "REFRESH_CNT"
+
+// Dashboard configuration schema. Migration only adds these keys and never
+// clears legacy application or Wi-Fi preferences.
+#define PREF_CONFIG_VERSION "CFG_VERSION"
+#define PREF_ACTIVE_PAGE "ACTIVE_PAGE"
+#define PREF_PAGE_COUNT "PAGE_COUNT"
+#define PREF_FOCUS_TEXT "FOCUS_TEXT"
+#define PREF_DASH_HASH "DASH_HASH"
+#define PREF_CAL_HASH "CAL_HASH"
+#define PREF_MANUAL_EPOCH "MANUAL_EPOCH"
+#define PREF_DASH_URL "DASH_URL"
+#define PREF_DASH_TOKEN "DASH_TOKEN"
+#define PREF_DASH_CA "DASH_CA"
+#define PREF_PANEL_CONFIG "PANEL_CFG" // Versioned local course/task/layout JSON.
 
 #endif

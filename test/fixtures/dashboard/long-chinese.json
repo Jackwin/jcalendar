@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-18T05:00:00Z",
+  "timezone": "Asia/Shanghai",
+  "local_date": "2026-10-18",
+  "weather": {"status":"ok","source":"qweather","observed_at":"2026-10-18T04:50:00Z","fetched_at":"2026-10-18T05:00:00Z","location_name":"新疆维吾尔自治区乌鲁木齐市","temp_c":-12,"temp_min_c":-18,"temp_max_c":-6,"condition":"雨夹雪转多云","condition_code":"404"},
+  "usage": [
+    {"provider":"openai","status":"stale","source":"provider_api","coverage":"project","completeness":"complete","window_start":"2026-10-17T16:00:00Z","window_end":"2026-10-18T03:00:00Z","fetched_at":"2026-10-18T03:00:00Z","observed_at":null,"input_tokens":999999,"output_tokens":1,"total_tokens":1000000,"balance":null}
+  ],
+  "focus": {"type":"manual","text":"完成桌面信息屏第一阶段协议、缓存、离线状态以及超长中文文本的边界验证"},
+  "refresh_after_seconds": 7200
+}

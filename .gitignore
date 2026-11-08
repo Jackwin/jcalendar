@@ -1,3 +1,4 @@
 .pio
 .vscode
 .DS_Store
+include/openai_usage_secrets.h

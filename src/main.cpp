@@ -1,509 +1,741 @@
 #include <Arduino.h>
-#include <ArduinoJson.h>
-
+#include <DNSServer.h>
+#include <OneButton.h>
+#include <Preferences.h>
+#include <WebServer.h>
+#include <WiFi.h>
 #include <WiFiManager.h>
 
+#include "driver/gpio.h"
+#if !CONFIG_IDF_TARGET_ESP32C3
+#include "driver/rtc_io.h"
+#endif
 #include "esp_sleep.h"
 
-#include <wiring.h>
-
-#include "battery.h"
-
-#include "led.h"
-#include "_sntp.h"
-#include "weather.h"
-#include "screen_ink.h"
 #include "_preference.h"
-#include "deepseek.h"
-
+#include "_sntp.h"
+#include "ble_config.h"
+#include "dashboard_cache.h"
+#include "dashboard_client.h"
+#include "local_dashboard.h"
+#include "led.h"
+#include "panel_admin.h"
+#include "refresh_scheduler.h"
+#include "screen_ink.h"
 #include "version.h"
+#include "wiring.h"
 
-#include "OneButton.h"
-OneButton button(KEY_M, true);
+namespace {
 
-void IRAM_ATTR checkTicks() {
-    button.tick();
+constexpr uint32_t WIFI_TIMEOUT_SECONDS = 10;
+constexpr uint32_t SNTP_WAIT_MS = SNTP_SYNC_TIMEOUT_MS + 1000;
+constexpr uint32_t SCREEN_WAIT_MS = 120000;
+constexpr uint32_t BUTTON_RELEASE_WAIT_MS = 2000;
+constexpr uint32_t GESTURE_WINDOW_MS = 4500;
+constexpr uint32_t CONFIG_WINDOW_MS = 15UL * 60UL * 1000UL;
+constexpr uint16_t CONFIG_VERSION = 1;
+constexpr uint8_t PAGE_COUNT = 2;
+constexpr uint8_t PAGE_DASHBOARD = 0;
+constexpr uint8_t PAGE_CALENDAR = 1;
+
+WiFiManager wifiManager;
+OneButton modeButton(KEY_M, true, true);
+bool mainFlowComplete = false;
+bool configSaved = false;
+bool factoryResetRequested = false;
+
+enum class Gesture : uint8_t {
+    None,
+    NextPage,
+    Configure,
+    ManualRefresh,
+};
+
+Gesture gesture = Gesture::None;
+
+void onClick() { gesture = Gesture::NextPage; }
+void onDoubleClick() { gesture = Gesture::Configure; }
+void onLongPress() { gesture = Gesture::Configure; }
+void onMultiClick() { gesture = Gesture::ManualRefresh; }
+
+void migratePreferences() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    const uint16_t version = preferences.getUShort(PREF_CONFIG_VERSION, 0);
+    if (version < 1) {
+        if (!preferences.isKey(PREF_ACTIVE_PAGE)) preferences.putUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+        if (!preferences.isKey(PREF_PAGE_COUNT)) preferences.putUChar(PREF_PAGE_COUNT, PAGE_COUNT);
+        if (!preferences.isKey(PREF_POWER_MODE)) preferences.putUChar(PREF_POWER_MODE, 0);
+        if (!preferences.isKey(PREF_EXT_MINUTES)) preferences.putUShort(PREF_EXT_MINUTES, 60);
+        if (!preferences.isKey(PREF_FOCUS_TEXT)) preferences.putString(PREF_FOCUS_TEXT, "");
+        preferences.putUShort(PREF_CONFIG_VERSION, CONFIG_VERSION);
+    }
+    if (preferences.getUChar(PREF_PAGE_COUNT, PAGE_COUNT) != PAGE_COUNT) {
+        preferences.putUChar(PREF_PAGE_COUNT, PAGE_COUNT);
+    }
+    if (preferences.getUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD) >= PAGE_COUNT) {
+        preferences.putUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+    }
+    preferences.end();
 }
 
-WiFiManager wm;
-WiFiManagerParameter para_qweather_host("qweather_host", "和风天气Host", "", 64); //     和风天气key
-WiFiManagerParameter para_qweather_key("qweather_key", "和风天气API Key", "", 32); //     和风天气key
-// const char* test_html = "<br/><label for='test'>天气模式</label><br/><input type='radio' name='test' value='0' checked> 每日天气test </input><input type='radio' name='test' value='1'> 实时天气test</input>";
-// WiFiManagerParameter para_test(test_html);
-WiFiManagerParameter para_qweather_type("qweather_type", "天气类型（0:每日天气，1:实时天气）", "0", 2, "pattern='\\[0-1]{1}'"); //     城市code
-WiFiManagerParameter para_qweather_location("qweather_loc", "位置ID", "", 64); //     城市code
-WiFiManagerParameter para_cd_day_label("cd_day_label", "倒数日（4字以内）", "", 10); //     倒数日
-WiFiManagerParameter para_cd_day_date("cd_day_date", "日期（yyyyMMdd）", "", 8, "pattern='\\d{8}'"); //     城市code
-WiFiManagerParameter para_tag_days("tag_days", "日期Tag（yyyyMMddx，详见README）", "", 30); //     日期Tag
-WiFiManagerParameter para_si_week_1st("si_week_1st", "每周起始（0:周日，1:周一）", "0", 2, "pattern='\\[0-1]{1}'"); //     每周第一天
-WiFiManagerParameter para_study_schedule("study_schedule", "课程表", "0", 4000, "pattern='\\[0-9]{3}[;]$'"); //     每周第一天
-WiFiManagerParameter para_deepseek_key("deepseek_key", "DeepSeek API Key", "", 64); //     DeepSeek API Key（用于显示token用量/余额）
-WiFiManagerParameter para_refresh_mode("refresh_mode", "刷新模式(0全刷/1LUT)", "0", 1); //  屏幕刷新模式
-
-#include <WebServer.h>
-WebServer configServer(80);
-
-void print_wakeup_reason() {
-    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-    switch (wakeup_reason) {
-    case ESP_SLEEP_WAKEUP_EXT0:
-        Serial.println("Wakeup caused by external signal using RTC_IO");
-        break;
-    case ESP_SLEEP_WAKEUP_EXT1:
-    {
-        Serial.println("Wakeup caused by external signal using RTC_CNTL");
-        uint64_t status = esp_sleep_get_ext1_wakeup_status();
-        if (status == 0) {
-            Serial.println(" *None of the configured pins woke us up");
-        } else {
-            Serial.print(" *Wakeup pin mask: ");
-            Serial.printf("0x%016llX\r\n", status);
-            for (int i = 0; i < 64; i++) {
-                if ((status >> i) & 0x1) {
-                    Serial.printf("  - GPIO%d\r\n", i);
-                }
-            }
-        }
-        break;
-    }
-    case ESP_SLEEP_WAKEUP_TIMER:
-        Serial.println("Wakeup caused by timer");
-        break;
-    case ESP_SLEEP_WAKEUP_TOUCHPAD:
-        Serial.println("Wakeup caused by touchpad");
-        break;
-    case ESP_SLEEP_WAKEUP_ULP:
-        Serial.println("Wakeup caused by ULP program");
-        break;
-    default:
-        Serial.printf("Wakeup was not caused by deep sleep.\r\n");
-    }
+uint8_t activePage() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const uint8_t page = preferences.getUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+    preferences.end();
+    return page < PAGE_COUNT ? page : PAGE_DASHBOARD;
 }
 
-void buttonClick(void* oneButton);
-void buttonDoubleClick(void* oneButton);
-void buttonLongPressStop(void* oneButton);
-void go_sleep();
-
-unsigned long _idle_millis;
-unsigned long TIME_TO_SLEEP = 180 * 1000;
-
-bool _wifi_flag = false;
-unsigned long _wifi_failed_millis;
-volatile bool _configRequested = false;  // 双击标志位
-void setup() {
-    delay(10);
-    Serial.begin(115200);
-    Serial.println();
-    Serial.println("=== J-Calendar Minimal Debug ===");
-    Serial.printf("Version: %s\r\n", J_VERSION);
-
-    led_init();
-    led_on();
-    delay(300);
-    led_off();
-
-    // 按键：双击设置标志位，loop 中处理
-    button.setClickMs(300);
-    button.setPressMs(3000);
-    button.attachDoubleClick([]() {
-        Preferences p;
-        p.begin(PREF_NAMESPACE, true);
-        String savedKey = p.getString(PREF_DS_KEY, "");
-        p.end();
-        Serial.println("=== DOUBLE CLICK - will open config portal ===");
-        Serial.print("Saved DS Key: ");
-        Serial.println(savedKey.length() > 0 ? savedKey.substring(0,8) + "..." : "(empty)");
-        _configRequested = true;
-    });
-    attachInterrupt(digitalPinToInterrupt(KEY_M), checkTicks, CHANGE);
-    
-    Serial.println("Ready. Double-click button to configure DeepSeek Key.");
-    Serial.println("------------------------------------------");
+uint8_t advancePage() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    const uint8_t page = (preferences.getUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD) + 1) % PAGE_COUNT;
+    preferences.putUChar(PREF_ACTIVE_PAGE, page);
+    preferences.end();
+    return page;
 }
 
-void loop() {
-    button.tick();
-    wm.process();
-    
-    // 双击触发 → 打开网页配置（ESP32 WebServer，任何时间都能访问）
-    if (_configRequested) {
-        _configRequested = false;
-        Serial.println("=== Opening Web Config ===");
-        Serial.printf("Visit http://%s/ to configure DeepSeek Key\r\n", WiFi.localIP().toString().c_str());
-        
-        // 设置 Web 路由
-        configServer.on("/", [](){
-            String html = "<html><head><meta charset='utf-8'><title>J-Calendar</title></head><body>";
-            html += "<h2>J-Calendar 配置</h2>";
-            html += "<form action='/save' method='POST'>";
-            html += "DeepSeek API Key: <input type='text' name='key' size='40' value='";
-            Preferences p;
-            p.begin(PREF_NAMESPACE, true);
-            html += p.getString(PREF_DS_KEY, "");
-            p.end();
-            html += "'><br><br>";
-            html += "<input type='submit' value='保存'>";
-            html += "</form></body></html>";
-            configServer.send(200, "text/html", html);
-        });
-        
-        configServer.on("/save", [](){
-            if (configServer.hasArg("key")) {
-                String key = configServer.arg("key");
-                Preferences p;
-                p.begin(PREF_NAMESPACE, false);
-                p.putString(PREF_DS_KEY, key);
-                p.end();
-                configServer.send(200, "text/html", 
-                    "<html><meta charset='utf-8'><body>"
-                    "<h2>✅ Key 已保存！</h2>"
-                    "<p>设备将在 3 秒后重启...</p>"
-                    "</body></html>");
-                Serial.println("[Config] Key saved via web! Restarting...");
-                delay(3000);
-                ESP.restart();
-            } else {
-                configServer.send(400, "text/html", "Missing key parameter");
-            }
-        });
-        
-        configServer.begin();
-        Serial.println("[Config] Web server started on port 80");
-        Serial.printf("[Config] Visit http://%s/\r\n", WiFi.localIP().toString().c_str());
-        
-        // 运行 Web 服务器 2 分钟
-        led_config();
-        unsigned long configStart = millis();
-        while (millis() - configStart < 120000) {
-            configServer.handleClient();
-            button.tick();
-            delay(10);
-        }
-        configServer.stop();
-        Serial.println("[Config] Web server stopped");
-        led_on();
-        return;
+String configuredFocus() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    String focus = preferences.getString(PREF_FOCUS_TEXT, "");
+    preferences.end();
+    if (focus.length() > dashboard::MAX_FOCUS_BYTES) {
+        size_t cut = dashboard::MAX_FOCUS_BYTES;
+        while (cut > 0 && (static_cast<uint8_t>(focus[cut]) & 0xc0) == 0x80) --cut;
+        focus.remove(cut);
     }
-    
-    // 配置门户运行中，不执行主流程
-    if (wm.getConfigPortalActive()) {
+    return focus;
+}
+
+Gesture detectWakeGesture() {
+    const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+#if CONFIG_IDF_TARGET_ESP32C3
+    const bool buttonWake = wakeCause == ESP_SLEEP_WAKEUP_GPIO;
+#else
+    const bool buttonWake = wakeCause == ESP_SLEEP_WAKEUP_EXT0;
+    // EXT0 leaves its pad in RTC IO mode. OneButton reads the digital GPIO,
+    // so restore the normal GPIO function before sampling the held key.
+    if (wakeCause != ESP_SLEEP_WAKEUP_UNDEFINED) {
+        const esp_err_t pinError = rtc_gpio_deinit(static_cast<gpio_num_t>(KEY_M));
+        if (pinError != ESP_OK) Serial.printf("[Button] RTC GPIO restore failed: %d\n", static_cast<int>(pinError));
+    }
+#endif
+    pinMode(KEY_M, INPUT_PULLUP);
+    const bool pressedAtBoot = digitalRead(KEY_M) == LOW;
+    Serial.printf("[Button] wake=%d level=%d\n", static_cast<int>(wakeCause), digitalRead(KEY_M));
+    // A held button must also work after a power-on or serial reset, not only
+    // after an EXT0/GPIO deep-sleep wake. Ignore ordinary timer boots.
+    if (!buttonWake && !pressedAtBoot) return Gesture::None;
+    gesture = Gesture::None;
+    modeButton.setDebounceMs(40);
+    modeButton.setClickMs(450);
+    modeButton.setPressMs(1200);
+    modeButton.attachClick(onClick);
+    modeButton.attachDoubleClick(onDoubleClick);
+    modeButton.attachMultiClick(onMultiClick);
+    modeButton.attachLongPressStart(onLongPress);
+    // A button wake proves the first press even if it ended during setup.
+    // Likewise seed a held button observed on a non-button boot.
+    const uint32_t seedStarted = millis();
+    do {
+        modeButton.tick(buttonWake || pressedAtBoot);
         delay(10);
-        return;
-    }
-    
-    // 主流程：只执行一次
-    static bool mainDone = false;
-    if (mainDone) {
+    } while (millis() - seedStarted <= 50);
+    const uint32_t started = millis();
+    while (gesture == Gesture::None && millis() - started < GESTURE_WINDOW_MS) {
+        modeButton.tick();
         delay(10);
-        return;
     }
-    
-    // 启动后等待 20 秒，方便用户双击进入配置
-    static unsigned long bootTime = millis();
-    if (millis() - bootTime < 20000) {
-        if (millis() - bootTime < 100) {
-            Serial.println("------------------------------------------");
-            Serial.println("[INFO] Double-click button to open Web Config.");
-            Serial.printf("[INFO] 20 seconds countdown...\r\n");
-        }
-        if ((millis() - bootTime) % 5000 < 15) {
-            Serial.printf("[%lu] Double-click for config...\r\n", 20 - (millis() - bootTime) / 1000);
-        }
-        delay(10);
-        return;
-    }
-    
-    mainDone = true;
-    
-    // 步骤1：连 WiFi
-    Serial.println("Step 1: Connecting WiFi...");
-    WiFi.mode(WIFI_STA);
-    wm.setHostname("J-Calendar");
-    wm.setEnableConfigPortal(false);
-    wm.setConnectTimeout(10);
-    
-    if (wm.autoConnect()) {
-        Serial.println("WiFi OK!");
-        
-        // 步骤2：同步时间
-        Serial.println("Step 2: Sync SNTP...");
-        _sntp_exec();
-        while (_sntp_status() == 0) { delay(100); }
-        Serial.printf("SNTP status: %d\r\n", _sntp_status());
-        
-        // 步骤3：查 DeepSeek 余额（仅余额，不消耗 token）
-        Serial.println("Step 3: Query DeepSeek balance...");
-        deepseek_exec_balance_only();
-        while (deepseek_status() == 0) { delay(100); }
-        Serial.printf("DeepSeek status: %d\r\n", deepseek_status());
-        
-        if (deepseek_status() == 1) {
-            DeepSeekData* ds = deepseek_data();
-            Serial.printf("Balance: %s %s\r\n", ds->currency.c_str(), ds->totalBalance.c_str());
-            Serial.printf("Today: Flash=%u Pro=%u\r\n", ds->tokensTodayFlash, ds->tokensTodayPro);
-        }
-        
-        // 步骤4：显示屏幕
-        // 首次启动：全刷。后续唤醒：仅局部刷新状态栏（DeepSeek数据变化时才刷）
-        time_t now = 0;
-        time(&now);
-        struct tm t;
-        localtime_r(&now, &t);
-        char todayBuf[9];
-        snprintf(todayBuf, sizeof(todayBuf), "%04d%02d%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
-        
-        Preferences pref;
-        pref.begin(PREF_NAMESPACE, true);
-        String fullDate = pref.getString(PREF_FULL_DATE, "");
-        bool todayFullDone = (fullDate == String(todayBuf));
-        pref.end();
-        
-        if (!todayFullDone) {
-            // 今日首次 = 全刷
-            Serial.println("Step 4: FULL screen refresh...");
-            si_screen();
-        } else {
-            // 今日非首次 = 局部刷新状态栏（免闪屏）
-            Serial.println("Step 4: PARTIAL status refresh (no flicker)...");
-            si_screen_partial_status();
-        }
-        while (si_screen_status() == 0) { delay(100); }
-        Serial.printf("Screen status: %d\r\n", si_screen_status());
-        
-    } else {
-        Serial.println("WiFi FAILED!");
-    }
-    
-    WiFi.mode(WIFI_OFF);
-    
-    // 计算下次唤醒时间：每小时整点
-    time_t now2 = 0;
-    time(&now2);
-    struct tm local;
-    localtime_r(&now2, &local);
-    int secsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec + 10;
-    
-    Serial.printf("Deep sleep %ds until next hour...\r\n", secsToNextHour);
-    delay(100);
-    
-    esp_sleep_enable_timer_wakeup((uint64_t)secsToNextHour * 1000000ULL);
-    esp_sleep_enable_ext0_wakeup(KEY_M, LOW);
-    esp_deep_sleep_start();
+    Serial.printf("[Button] gesture=%u\n", static_cast<unsigned>(gesture));
+    return gesture;
 }
 
-// ====== 以下旧代码临时禁用 ======
-#if 0
-
-
-// 刷新页面
-void buttonClick(void* oneButton) {
-    Serial.println("Button click.");
-    if (wm.getConfigPortalActive()) {
-        Serial.println("In config status.");
-    } else {
-        Serial.println("Refresh screen manually.");
-        Preferences pref;
-        pref.begin(PREF_NAMESPACE);
-        int _si_type = pref.getInt(PREF_SI_TYPE);
-        pref.putInt(PREF_SI_TYPE, _si_type == 0 ? 1 : 0);
-        pref.end();
-        si_screen();
-    }
-}
-
-void saveParamsCallback() {
-    Preferences pref;
-    pref.begin(PREF_NAMESPACE);
-    pref.putString(PREF_QWEATHER_HOST, para_qweather_host.getValue());
-    pref.putString(PREF_QWEATHER_KEY, para_qweather_key.getValue());
-    pref.putString(PREF_QWEATHER_TYPE, strcmp(para_qweather_type.getValue(), "1") == 0 ? "1" : "0");
-    pref.putString(PREF_QWEATHER_LOC, para_qweather_location.getValue());
-    pref.putString(PREF_CD_DAY_LABLE, para_cd_day_label.getValue());
-    pref.putString(PREF_CD_DAY_DATE, para_cd_day_date.getValue());
-    pref.putString(PREF_TAG_DAYS, para_tag_days.getValue());
-    pref.putString(PREF_SI_WEEK_1ST, strcmp(para_si_week_1st.getValue(), "1") == 0 ? "1" : "0");
-    pref.putString(PREF_STUDY_SCHEDULE, para_study_schedule.getValue());
-    pref.putString(PREF_DS_KEY, para_deepseek_key.getValue());
-    pref.putUChar(PREF_REFRESH_MODE, strcmp(para_refresh_mode.getValue(), "1") == 0 ? 1 : 0);
-    pref.end();
-
-    Serial.println("Params saved.");
-
-    _idle_millis = millis(); // 刷新无操作时间点
-
-    ESP.restart();
-}
-
-void preSaveParamsCallback() {
-}
-
-// 双击打开配置页面
-void buttonDoubleClick(void* oneButton) {
-    Serial.println("Button double click.");
-    if (wm.getConfigPortalActive()) {
-        ESP.restart();
-        return;
-    }
-
-    if (weather_status == 0) {
-        weather_stop();
-    }
-    deepseek_stop();
-
-    // 设置配置页面
-    // 根据配置信息设置默认值
-    Preferences pref;
-    pref.begin(PREF_NAMESPACE);
-    String qHost = pref.getString(PREF_QWEATHER_HOST);
-    String qToken = pref.getString(PREF_QWEATHER_KEY);
-    String qType = pref.getString(PREF_QWEATHER_TYPE, "0");
-    String qLoc = pref.getString(PREF_QWEATHER_LOC);
-    String cddLabel = pref.getString(PREF_CD_DAY_LABLE);
-    String cddDate = pref.getString(PREF_CD_DAY_DATE);
-    String tagDays = pref.getString(PREF_TAG_DAYS);
-    String week1st = pref.getString(PREF_SI_WEEK_1ST, "0");
-    String studySchedule = pref.getString(PREF_STUDY_SCHEDULE);
-    String dsKey = pref.getString(PREF_DS_KEY);
-    String refreshMode = pref.getUChar(PREF_REFRESH_MODE, 0) == 1 ? "1" : "0";
-    pref.end();
-
-    para_qweather_host.setValue(qHost.c_str(), 64);
-    para_qweather_key.setValue(qToken.c_str(), 32);
-    para_qweather_location.setValue(qLoc.c_str(), 64);
-    para_qweather_type.setValue(qType.c_str(), 1);
-    para_cd_day_label.setValue(cddLabel.c_str(), 16);
-    para_cd_day_date.setValue(cddDate.c_str(), 8);
-    para_tag_days.setValue(tagDays.c_str(), 30);
-    para_si_week_1st.setValue(week1st.c_str(), 1);
-    para_study_schedule.setValue(studySchedule.c_str(), 4000);
-    para_deepseek_key.setValue(dsKey.c_str(), 64);
-    para_refresh_mode.setValue(refreshMode.c_str(), 1);
-
-    wm.setTitle("J-Calendar");
-    wm.addParameter(&para_si_week_1st);
-    wm.addParameter(&para_qweather_host);
-    wm.addParameter(&para_qweather_key);
-    wm.addParameter(&para_qweather_type);
-    wm.addParameter(&para_qweather_location);
-    wm.addParameter(&para_cd_day_label);
-    wm.addParameter(&para_cd_day_date);
-    wm.addParameter(&para_tag_days);
-    wm.addParameter(&para_study_schedule);
-    wm.addParameter(&para_deepseek_key);
-    wm.addParameter(&para_refresh_mode);
-    // std::vector<const char *> menu = {"wifi","wifinoscan","info","param","custom","close","sep","erase","update","restart","exit"};
-    std::vector<const char*> menu = { "wifi","param","update","sep","info","restart","exit" };
-    wm.setMenu(menu); // custom menu, pass vector
-    wm.setConfigPortalBlocking(false);
-    wm.setBreakAfterConfig(true);
-    wm.setPreSaveParamsCallback(preSaveParamsCallback);
-    wm.setSaveParamsCallback(saveParamsCallback);
-    wm.setSaveConnect(false); // 保存完wifi信息后是否自动连接，设置为否，以便于用户继续配置param。
-    wm.startConfigPortal("J-Calendar", "password");
-
-    led_config(); // LED 进入三快闪状态
-
-    // 控制配置超时180秒后休眠
-    _idle_millis = millis();
-}
-
-// 重置系统，并重启
-void buttonLongPressStop(void* oneButton) {
-    Serial.println("Button long press.");
-
-    // 删除Preferences，namespace下所有健值对。
-    Preferences pref;
-    pref.begin(PREF_NAMESPACE);
-    pref.clear();
-    pref.end();
-
-    ESP.restart();
-}
-
-#define uS_TO_S_FACTOR 1000000
-#define TIMEOUT_TO_SLEEP  10 // seconds
-time_t blankTime = 0;
-void go_sleep() {
-    uint64_t p;
-    // 根据配置情况来刷新，如果未配置qweather信息，则24小时刷新，否则每2小时刷新
-    // 如果配置了 DeepSeek Key，则始终每小时刷新（方便查看 token 用量）
-    Preferences pref;
-    pref.begin(PREF_NAMESPACE);
-    String _qweather_key = pref.getString(PREF_QWEATHER_KEY, "");
-    String _ds_key = pref.getString(PREF_DS_KEY, "");
-    pref.end();
-
-    time_t now;
+bool manualRefreshAllowed() {
+    time_t now = 0;
     time(&now);
-    struct tm local;
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    const uint64_t previous = preferences.getULong64(PREF_MANUAL_EPOCH, 0);
+    const bool validClock = now >= 1577836800;
+    const bool allowed = !validClock || previous == 0 || static_cast<uint64_t>(now) >= previous + 30;
+    if (allowed && validClock) preferences.putULong64(PREF_MANUAL_EPOCH, static_cast<uint64_t>(now));
+    preferences.end();
+    return allowed;
+}
+
+String htmlEscape(String value) {
+    value.replace("&", "&amp;");
+    value.replace("<", "&lt;");
+    value.replace(">", "&gt;");
+    value.replace("\"", "&quot;");
+    value.replace("'", "&#39;");
+    return value;
+}
+
+void runConfigurationPortal() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const uint8_t configuredPower = preferences.getUChar(PREF_POWER_MODE, 0);
+    const uint16_t configuredInterval = preferences.getUShort(PREF_EXT_MINUTES, 60);
+    const String configuredDashboardUrl = preferences.getString(PREF_DASH_URL, "");
+    const String configuredWeatherHost = preferences.getString(PREF_QWEATHER_HOST, "");
+    const String configuredLocation = preferences.getString(PREF_QWEATHER_LOC, "");
+    const String configuredKid = preferences.getString(PREF_QW_JWT_KID, "");
+    const String configuredSub = preferences.getString(PREF_QW_JWT_SUB, "");
+    preferences.end();
+    String pendingSsid;
+    String pendingPassword;
+    configSaved = false;
+    factoryResetRequested = false;
+
+    WiFi.mode(WIFI_AP_STA);
+    wifiManager.setHostname("J-Calendar");
+    WiFi.softAP("J-Calendar-Setup", "JCalendar");
+    if (!wifiManager.getWiFiSSID(true).isEmpty()) WiFi.begin();
+    Serial.printf("[Config] connect to J-Calendar-Setup; open http://%s (15 minute window)\n",
+                  WiFi.softAPIP().toString().c_str());
+    DNSServer dns;
+    dns.start(53, "*", WiFi.softAPIP());
+    WebServer server(80);
+    server.on("/", HTTP_GET, [&]() {
+        const String page = String("<html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>")
+            + "<body><h2>J-Calendar 配置</h2><form method='post' action='/save'>"
+            + "<label>Wi-Fi 名称（留空则保留）</label><input name='ssid' maxlength='32'><br>"
+            + "<label>Wi-Fi 密码</label><input name='password' type='password' maxlength='64'><br>"
+            + "<h3>和风天气</h3>"
+            + "<label>专属 API Host</label><input name='weather_host' maxlength='80' value='" + htmlEscape(configuredWeatherHost) + "'><br>"
+            + "<label>位置 ID / 经度,纬度</label><input name='weather_location' maxlength='48' value='" + htmlEscape(configuredLocation) + "'><br>"
+            + "<label>JWT 凭据 ID（kid）</label><input name='weather_kid' maxlength='63' value='" + htmlEscape(configuredKid) + "'><br>"
+            + "<label>JWT 项目 ID（sub）</label><input name='weather_sub' maxlength='63' value='" + htmlEscape(configuredSub) + "'><br>"
+            + "<label>Ed25519 私钥 PEM（留空保留）</label><br><textarea name='weather_private' rows='4' cols='36' maxlength='1024'></textarea>"
+            + "<h3>DeepSeek 余额</h3><label>API Key（留空保留）</label><input name='deepseek_key' type='password' maxlength='256' autocomplete='new-password'>"
+            + "<p>直接查询账户余额；Token 用量需另接统计服务。</p>"
+            + "<details><summary>可选：聚合代理服务</summary>"
+            + "<label>代理接口 HTTPS 地址</label><input name='dashboard_url' type='url' maxlength='512' value='"
+            + htmlEscape(configuredDashboardUrl) + "'><br>"
+            + "<label>代理访问令牌（留空保留）</label><input name='dashboard_token' type='password' maxlength='512' autocomplete='new-password'><br>"
+            + "<label>HTTPS 根证书 PEM（留空保留）</label><br><textarea name='dashboard_ca' rows='5' cols='36' maxlength='4096'></textarea>"
+            + "<p>已配置代理时优先使用代理数据；留空使用上方和风天气与 DeepSeek。</p></details>"
+            + "<label>今日重点</label><input name='focus' maxlength='144' value='"
+            + htmlEscape(configuredFocus()) + "'><br>"
+            + "<label>电源模式</label><select name='power'>"
+            + "<option value='0'" + (configuredPower == 0 ? " selected" : "") + ">均衡</option>"
+            + "<option value='1'" + (configuredPower == 1 ? " selected" : "") + ">省电</option>"
+            + "<option value='2'" + (configuredPower == 2 ? " selected" : "") + ">外接电源</option></select><br>"
+            + "<label>外接刷新间隔</label><select name='interval'>"
+            + "<option value='30'" + (configuredInterval == 30 ? " selected" : "") + ">30 分钟</option>"
+            + "<option value='60'" + (configuredInterval != 30 ? " selected" : "") + ">60 分钟</option></select><br>"
+            + "<button type='submit'>保存并退出</button></form>"
+            + "<p><a href='/panel'>课程表、待办与显示模板</a></p>"
+            + "<p><a href='/factory-confirm'>恢复出厂设置（需要再次确认）</a></p></body></html>";
+        server.send(200, "text/html; charset=utf-8", page);
+    });
+    server.on("/panel", HTTP_GET, [&]() {
+        server.sendHeader("Cache-Control", "no-store");
+        server.sendHeader("X-Content-Type-Options", "nosniff");
+        server.sendHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'");
+        server.send_P(200, "text/html; charset=utf-8", panel::html());
+    });
+    server.on("/api/panel", HTTP_GET, [&]() {
+        panel::Config config;
+        panel::load(config);
+        server.sendHeader("Cache-Control", "no-store");
+        server.send(200, "application/json; charset=utf-8", panel::toJson(config));
+    });
+    server.on("/api/panel", HTTP_POST, [&]() {
+        if (server.header("X-Panel-Request") != "1") {
+            server.send(403, "application/json; charset=utf-8", "{\"error\":\"缺少面板请求标记\"}");
+            return;
+        }
+        const String body = server.arg("plain");
+        if (body.length() > 3900) {
+            server.send(413, "application/json; charset=utf-8", "{\"error\":\"配置内容过大\"}");
+            return;
+        }
+        String error;
+        if (!panel::save(body, error)) {
+            server.send(400, "application/json; charset=utf-8", String("{\"error\":\"") + error + "\"}");
+            return;
+        }
+        panel::Config saved;
+        if (!panel::load(saved)) {
+            server.send(500, "application/json; charset=utf-8", "{\"error\":\"保存后无法读取模板\"}");
+            return;
+        }
+        Preferences writable;
+        writable.begin(PREF_NAMESPACE, false);
+        writable.putUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+        writable.end();
+        configSaved = true;
+        server.sendHeader("Cache-Control", "no-store");
+        server.send(200, "application/json; charset=utf-8",
+                    String("{\"saved\":true,\"layout\":\"") + panel::layoutName(saved.layout) + "\"}");
+    });
+    server.on("/save", HTTP_POST, [&]() {
+        String dashboardUrl = server.arg("dashboard_url");
+        String dashboardToken = server.arg("dashboard_token");
+        String dashboardCa = server.arg("dashboard_ca");
+        dashboardUrl.trim();
+        dashboardToken.trim();
+        dashboardCa.trim();
+        if ((!dashboardUrl.isEmpty() && (!dashboardUrl.startsWith("https://") || dashboardUrl.length() > 512))
+            || dashboardToken.length() > 512 || dashboardCa.length() > 4096
+            || (!dashboardCa.isEmpty() && (!dashboardCa.startsWith("-----BEGIN CERTIFICATE-----")
+                || dashboardCa.indexOf("-----END CERTIFICATE-----") < 0))) {
+            server.send(400, "text/plain; charset=utf-8", "代理地址必须为 HTTPS，证书须为 PEM 格式；请返回修改。");
+            return;
+        }
+        String focus = server.arg("focus");
+        if (focus.length() > dashboard::MAX_FOCUS_BYTES) {
+            size_t cut = dashboard::MAX_FOCUS_BYTES;
+            while (cut > 0 && (static_cast<uint8_t>(focus[cut]) & 0xc0) == 0x80) --cut;
+            focus.remove(cut);
+        }
+        const int power = server.arg("power").toInt();
+        const int interval = server.arg("interval").toInt();
+        Preferences writable;
+        writable.begin(PREF_NAMESPACE, false);
+        writable.putString(PREF_FOCUS_TEXT, focus);
+        writable.putUChar(PREF_POWER_MODE, power >= 0 && power <= 2 ? power : 0);
+        writable.putUShort(PREF_EXT_MINUTES, interval == 30 ? 30 : 60);
+        if (!dashboardUrl.isEmpty()) writable.putString(PREF_DASH_URL, dashboardUrl);
+        if (!dashboardToken.isEmpty()) writable.putString(PREF_DASH_TOKEN, dashboardToken);
+        if (!dashboardCa.isEmpty()) writable.putString(PREF_DASH_CA, dashboardCa);
+        const char* weatherFields[] = {"weather_host", "weather_location", "weather_kid", "weather_sub", "weather_private", "deepseek_key"};
+        const char* weatherKeys[] = {PREF_QWEATHER_HOST, PREF_QWEATHER_LOC, PREF_QW_JWT_KID, PREF_QW_JWT_SUB, PREF_QW_JWT_PRIV, PREF_DS_KEY};
+        for (size_t i = 0; i < 6; ++i) {
+            String value = server.arg(weatherFields[i]);
+            value.trim();
+            if (!value.isEmpty()) writable.putString(weatherKeys[i], value);
+        }
+        writable.putString(PREF_QWEATHER_TYPE, "1");
+        writable.putUChar(PREF_ACTIVE_PAGE, PAGE_DASHBOARD);
+        writable.end();
+        pendingSsid = server.arg("ssid");
+        pendingPassword = server.arg("password");
+        configSaved = true;
+        server.send(200, "text/html; charset=utf-8", "<html><meta charset='utf-8'><body>设置已保存，配置窗口正在关闭。</body></html>");
+    });
+    server.on("/factory-confirm", HTTP_GET, [&]() {
+        server.send(200, "text/html; charset=utf-8",
+            "<html><meta charset='utf-8'><body><h2>恢复出厂设置</h2>"
+            "<p>此操作会清除设备配置和 Wi-Fi。请输入 RESET 再确认。</p>"
+            "<form method='post' action='/factory-reset'><input name='confirm'>"
+            "<button type='submit'>确认清除</button></form><a href='/'>取消</a></body></html>");
+    });
+    server.on("/factory-reset", HTTP_POST, [&]() {
+        if (!server.hasArg("confirm") || server.arg("confirm") != "RESET") {
+            server.send(400, "text/plain; charset=utf-8", "确认文字不正确，未清除任何设置");
+            return;
+        }
+        factoryResetRequested = true;
+        server.send(200, "text/plain; charset=utf-8", "已确认，配置即将清除");
+    });
+    server.onNotFound([&]() {
+        server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
+        server.send(302, "text/plain", "");
+    });
+    const char* panelHeaders[] = {"X-Panel-Request"};
+    server.collectHeaders(panelHeaders, 1);
+    server.begin();
+    const uint32_t blePin = bleConfigStart();
+    if (blePin != 0) {
+        // The pairing page is transient and must never be considered the
+        // persisted dashboard/calendar image. If power is lost or the device
+        // resets in this window, the next boot must repaint the normal page.
+        Preferences screenState;
+        if (screenState.begin(PREF_NAMESPACE, false)) {
+            screenState.putUInt(PREF_DASH_HASH, 0);
+            screenState.putUInt(PREF_CAL_HASH, 0);
+            screenState.end();
+        }
+        si_ble_pairing_screen(blePin);
+    }
+    const uint32_t started = millis();
+    bool staAddressLogged = false;
+    while (!configSaved && !factoryResetRequested && millis() - started < CONFIG_WINDOW_MS) {
+        dns.processNextRequest();
+        server.handleClient();
+        bleConfigPoll();
+        if (bleConfigShouldRestart()) configSaved = true;
+        if (!staAddressLogged && WiFi.status() == WL_CONNECTED) {
+            Serial.printf("[Config] LAN panel: http://%s/panel\n", WiFi.localIP().toString().c_str());
+            staAddressLogged = true;
+        }
+        delay(10);
+    }
+    server.stop();
+    bleConfigStop();
+    dns.stop();
+    WiFi.softAPdisconnect(true);
+    if (factoryResetRequested) {
+        Preferences writable;
+        writable.begin(PREF_NAMESPACE, false);
+        writable.clear();
+        writable.end();
+        wifiManager.resetSettings();
+        Serial.println("[Config] factory reset confirmed and completed");
+    } else {
+        if (configSaved && !pendingSsid.isEmpty()) {
+            WiFi.persistent(true);
+            WiFi.begin(pendingSsid.c_str(), pendingPassword.c_str());
+            WiFi.persistent(false);
+        }
+        Serial.printf("[Config] portal closed (%s)\n", configSaved ? "saved" : "timeout");
+    }
+    WiFi.mode(WIFI_STA);
+}
+
+uint32_t fnvAppend(uint32_t hash, const String& value) {
+    for (size_t i = 0; i < value.length(); ++i) {
+        hash ^= static_cast<uint8_t>(value[i]);
+        hash *= 16777619UL;
+    }
+    return hash;
+}
+
+uint32_t snapshotDisplayHash(const dashboard::Snapshot& snapshot, bool offline, uint8_t page) {
+    uint32_t hash = 2166136261UL;
+    // A firmware-only layout change must invalidate the persisted e-paper image.
+    hash = fnvAppend(hash, "dashboard-layout-v8-transient-clear");
+    hash = fnvAppend(hash, String(page));
+    hash = fnvAppend(hash, String(offline));
+    hash = fnvAppend(hash, snapshot.localDate);
+    hash = fnvAppend(hash, snapshot.weather.locationName);
+    hash = fnvAppend(hash, snapshot.weather.condition);
+    hash = fnvAppend(hash, snapshot.weather.observedAt);
+    hash = fnvAppend(hash, String(static_cast<uint8_t>(snapshot.weather.status)));
+    if (snapshot.weather.tempC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempC.value));
+    if (snapshot.weather.tempMinC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMinC.value));
+    if (snapshot.weather.tempMaxC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMaxC.value));
+    for (uint8_t i = 0; i < snapshot.usageCount; ++i) {
+        const dashboard::UsageData& usage = snapshot.usage[i];
+        hash = fnvAppend(hash, usage.provider + usage.coverage + String(static_cast<uint8_t>(usage.status)));
+        if (usage.inputTokens.hasValue) hash = fnvAppend(hash, String(usage.inputTokens.value));
+        if (usage.outputTokens.hasValue) hash = fnvAppend(hash, String(usage.outputTokens.value));
+        if (usage.totalTokens.hasValue) hash = fnvAppend(hash, String(usage.totalTokens.value));
+        hash = fnvAppend(hash, usage.balance.currency + usage.balance.amount
+            + String(static_cast<uint8_t>(usage.balance.status)));
+    }
+    hash = fnvAppend(hash, snapshot.focus.text);
+    if (page == PAGE_DASHBOARD) {
+        Preferences preferences;
+        preferences.begin(PREF_NAMESPACE, true);
+        if (preferences.isKey(PREF_PANEL_CONFIG)) {
+            hash = fnvAppend(hash, preferences.getString(PREF_PANEL_CONFIG, ""));
+        }
+        preferences.end();
+    }
+    return hash;
+}
+
+uint32_t calendarDisplayHash(const dashboard::Snapshot& snapshot, bool offline) {
+    time_t now = 0;
+    time(&now);
+    struct tm local = {};
     localtime_r(&now, &local);
+    char date[16];
+    snprintf(date, sizeof(date), "%04d-%02d-%02d", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday);
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const String content = String(date) + preferences.getString(PREF_TODO_LIST, "")
+        + preferences.getString(PREF_WORD_LIST, "") + preferences.getString(PREF_SI_WEEK_1ST, "0");
+    preferences.end();
+    uint32_t hash = fnvAppend(2166136261UL, "calendar-bottom-v5-transient-clear");
+    hash = fnvAppend(hash, content);
+    hash = fnvAppend(hash, snapshot.localDate);
+    hash = fnvAppend(hash, snapshot.weather.locationName + snapshot.weather.condition);
+    if (snapshot.weather.tempC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempC.value));
+    if (snapshot.weather.tempMinC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMinC.value));
+    if (snapshot.weather.tempMaxC.hasValue) hash = fnvAppend(hash, String(snapshot.weather.tempMaxC.value));
+    hash = fnvAppend(hash, snapshot.focus.text);
+    return fnvAppend(hash, String(offline));
+}
 
-    bool dsConfigured = (_ds_key.length() > 0);
+bool displayChanged(uint8_t page, uint32_t hash, bool force) {
+    if (force) return true;
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const uint32_t previous = preferences.getUInt(page == PAGE_DASHBOARD ? PREF_DASH_HASH : PREF_CAL_HASH, 0);
+    preferences.end();
+    return previous == 0 || previous != hash;
+}
 
-    if (_qweather_key.length() == 0 || weather_type() == 0) { // 没有配置天气或者使用按日天气，则第二天刷新。
-        if (dsConfigured) {
-            // DeepSeek 已配置：每小时唤醒一次更新 token 用量
-            int secondsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec;
-            Serial.printf("Seconds to next hour (DS mode): %d seconds.\n", secondsToNextHour);
-            p = (uint64_t)(secondsToNextHour);
-            p = p < 0 ? 3600 : (p + 10);
+void storeDisplayHash(uint8_t page, uint32_t hash) {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    preferences.putUInt(page == PAGE_DASHBOARD ? PREF_DASH_HASH : PREF_CAL_HASH, hash);
+    preferences.end();
+}
+
+bool waitForSntp() {
+    const uint32_t started = millis();
+    while (_sntp_status() == SYNC_STATUS_IN_PROGRESS && millis() - started < SNTP_WAIT_MS) {
+        delay(50);
+    }
+    if (_sntp_status() == SYNC_STATUS_IN_PROGRESS) _sntp_stop();
+    return _sntp_status() == SYNC_STATUS_OK;
+}
+
+bool waitForScreen() {
+    const uint32_t started = millis();
+    while (si_screen_status() == 0 && millis() - started < SCREEN_WAIT_MS) delay(50);
+    if (si_screen_status() == 0) {
+        Serial.println("[Screen] refresh timeout; forcing shutdown path");
+        si_screen_stop();
+        return false;
+    }
+    return si_screen_status() == 1;
+}
+
+dashboard::PowerMode configuredPowerMode(uint16_t& externalMinutes) {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, true);
+    const uint8_t raw = preferences.getUChar(PREF_POWER_MODE, 0);
+    externalMinutes = preferences.getUShort(PREF_EXT_MINUTES, 60);
+    preferences.end();
+    if (raw == 1) return dashboard::PowerMode::Saver;
+    if (raw == 2) return dashboard::PowerMode::ExternalPower;
+    return dashboard::PowerMode::Balanced;
+}
+
+void recordSuccessfulRefresh() {
+    Preferences preferences;
+    preferences.begin(PREF_NAMESPACE, false);
+    preferences.putUInt(PREF_REFRESH_COUNT, preferences.getUInt(PREF_REFRESH_COUNT, 0) + 1);
+    preferences.end();
+}
+
+bool buttonReleasedStable() {
+    pinMode(KEY_M, INPUT_PULLUP);
+    const uint32_t started = millis();
+    uint32_t highSince = 0;
+    while (millis() - started < BUTTON_RELEASE_WAIT_MS) {
+        if (digitalRead(KEY_M) == HIGH) {
+            if (highSince == 0) highSince = millis();
+            if (millis() - highSince >= 50) return true;
         } else {
-            // Sleep to next day
-            int secondsToNextDay = (24 - local.tm_hour) * 3600 - local.tm_min * 60 - local.tm_sec;
-            Serial.printf("Seconds to next day: %d seconds.\n", secondsToNextDay);
-            p = (uint64_t)(secondsToNextDay);
-            p = p < 0 ? 3600 * 24 : (p + 30); // 额外增加30秒，避免过早唤醒
+            highSince = 0;
+        }
+        delay(10);
+    }
+    return false;
+}
+
+void enterDeepSleep() {
+    _sntp_stop();
+    WiFi.disconnect(true, false);
+    WiFi.mode(WIFI_OFF);
+
+    uint16_t externalMinutes = 60;
+    const dashboard::PowerMode mode = configuredPowerMode(externalMinutes);
+    time_t now = 0;
+    time(&now);
+    const uint32_t seconds = dashboard::nextWakeSeconds(now, mode, externalMinutes);
+    Serial.printf("[Sleep] next wake in %lu seconds\n", static_cast<unsigned long>(seconds));
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(seconds) * 1000000ULL);
+    if (buttonReleasedStable()) {
+#if CONFIG_IDF_TARGET_ESP32C3
+        const esp_err_t wakeError = esp_deep_sleep_enable_gpio_wakeup(1ULL << KEY_M, ESP_GPIO_WAKEUP_GPIO_LOW);
+#else
+        const esp_err_t wakeError = esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(KEY_M), LOW);
+#endif
+        if (wakeError != ESP_OK) {
+            Serial.printf("[Sleep] button wake setup failed: %d; retrying in 5 seconds\n", static_cast<int>(wakeError));
+            esp_sleep_enable_timer_wakeup(5ULL * 1000000ULL);
+        } else {
+#if !CONFIG_IDF_TARGET_ESP32C3
+            // Digital INPUT_PULLUP is not the RTC pull-up used by EXT0 in
+            // deep sleep. Keep the released key at a defined HIGH level.
+            const esp_err_t pullDownError = rtc_gpio_pulldown_dis(static_cast<gpio_num_t>(KEY_M));
+            const esp_err_t pullUpError = rtc_gpio_pullup_en(static_cast<gpio_num_t>(KEY_M));
+            if (pullDownError != ESP_OK || pullUpError != ESP_OK) {
+                Serial.printf("[Sleep] RTC button bias failed: down=%d up=%d; retrying in 5 seconds\n",
+                              static_cast<int>(pullDownError), static_cast<int>(pullUpError));
+                esp_sleep_enable_timer_wakeup(5ULL * 1000000ULL);
+            } else {
+                Serial.println("[Sleep] RTC button pull-up enabled");
+                Serial.println("[Sleep] button wake armed");
+            }
+#else
+            Serial.println("[Sleep] button wake armed");
+#endif
         }
     } else {
-        // 实时天气：每偶数小时刷新
-        if (dsConfigured) {
-            // DeepSeek 已配置：每小时唤醒
-            int secondsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec;
-            Serial.printf("Seconds to next hour (DS+weather mode): %d seconds.\n", secondsToNextHour);
-            p = (uint64_t)(secondsToNextHour);
-            p = p < 0 ? 3600 : (p + 10);
-        } else {
-            // Sleep to next even hour.
-            int secondsToNextHour = (60 - local.tm_min) * 60 - local.tm_sec;
-            if ((local.tm_hour % 2) == 0) { // 如果是奇数点，则多睡1小时
-                secondsToNextHour += 3600;
-            }
-            Serial.printf("Seconds to next even hour: %d seconds.\n", secondsToNextHour);
-            p = (uint64_t)(secondsToNextHour);
-            p = p < 0 ? 3600 : (p + 10); // 额外增加10秒，避免过早唤醒
-        }
+        // EXT0 is level-triggered: sleeping while the key is low would cause
+        // an immediate wake loop. Retry soon instead of becoming unresponsive
+        // for the full scheduled interval after the key is released.
+        Serial.println("[Sleep] button still held; retrying in 5 seconds");
+        esp_sleep_enable_timer_wakeup(5ULL * 1000000ULL);
     }
 
-    esp_sleep_enable_timer_wakeup(p * (uint64_t)uS_TO_S_FACTOR);
-    esp_sleep_enable_ext0_wakeup(KEY_M, LOW);
-
-    // 省电考虑，关闭RTC外设和存储器
-    // esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF); // RTC IO, sensors and ULP, 注意：由于需要按键唤醒，所以不能关闭，否则会导致RTC_IO唤醒(ext0)失败
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_OFF); // 
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
-    esp_sleep_pd_config(ESP_PD_DOMAIN_XTAL, ESP_PD_OPTION_OFF);
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC8M, ESP_PD_OPTION_OFF);
-
-    gpio_deep_sleep_hold_dis(); // 解除所有引脚的保持状态
-    
-    // 省电考虑，重置gpio，平均每针脚能省8ua。
-    // gpio_reset_pin(PIN_LED_R); // 减小deep-sleep电流
-    gpio_reset_pin(SPI_CS); // 减小deep-sleep电流
-    gpio_reset_pin(SPI_DC); // 减小deep-sleep电流
-    gpio_reset_pin(SPI_RST); // 减小deep-sleep电流
-    gpio_reset_pin(SPI_BUSY); // 减小deep-sleep电流`
-    gpio_reset_pin(SPI_MOSI); // 减小deep-sleep电流
-    gpio_reset_pin(SPI_MISO); // 减小deep-sleep电流
-    gpio_reset_pin(SPI_SCK); // 减小deep-sleep电流
-    // gpio_reset_pin(PIN_ADC); // 减小deep-sleep电流
-    // gpio_reset_pin(I2C_SDA); // 减小deep-sleep电流
-    // gpio_reset_pin(I2C_SCL); // 减小deep-sleep电流
-
-    delay(10);
-    Serial.println("Deep sleep...");
+    gpio_deep_sleep_hold_dis();
+    gpio_reset_pin(static_cast<gpio_num_t>(SPI_CS));
+    gpio_reset_pin(static_cast<gpio_num_t>(SPI_DC));
+    gpio_reset_pin(static_cast<gpio_num_t>(SPI_RST));
+    gpio_reset_pin(static_cast<gpio_num_t>(SPI_BUSY));
+    gpio_reset_pin(static_cast<gpio_num_t>(SPI_MOSI));
+    gpio_reset_pin(static_cast<gpio_num_t>(SPI_MISO));
+    gpio_reset_pin(static_cast<gpio_num_t>(SPI_SCK));
     Serial.flush();
     esp_deep_sleep_start();
 }
 
-#endif // #if 0
+void runMainFlow(Gesture wakeGesture) {
+    bool forceRefresh = wakeGesture == Gesture::NextPage;
+    bool networkAllowed = true;
+    WiFi.mode(WIFI_STA);
+    const bool needsWifiSetup = wifiManager.getWiFiSSID(true).isEmpty();
+    if (needsWifiSetup) Serial.println("[WiFi] no saved network; opening configuration portal");
+    if (wakeGesture == Gesture::Configure || needsWifiSetup) {
+        runConfigurationPortal();
+        // Always clear the transient BLE pairing PIN from e-paper.
+        forceRefresh = true;
+        if (factoryResetRequested) {
+            migratePreferences();
+        }
+    } else if (wakeGesture == Gesture::ManualRefresh) {
+        forceRefresh = manualRefreshAllowed();
+        networkAllowed = forceRefresh;
+        if (!forceRefresh) Serial.println("[Button] manual refresh ignored during 30 second cooldown");
+    }
+
+    uint8_t page = activePage();
+    if (wakeGesture == Gesture::NextPage) page = advancePage();
+    panel::Config savedPanel;
+    const bool localPanelAfterSave = configSaved && page == PAGE_DASHBOARD
+        && panel::load(savedPanel) && savedPanel.layout != panel::Layout::Dashboard;
+    if (localPanelAfterSave) {
+        // A local course/task template needs no remote data. Fetching weather
+        // and account data here delays the first visible refresh after save.
+        networkAllowed = false;
+        Serial.printf("[Panel] saved %s template; refreshing without network fetch\n",
+                      panel::layoutName(savedPanel.layout));
+    }
+    dashboard::Snapshot snapshot;
+    const bool cacheAvailable = dashboard::dashboard_cache_load(snapshot);
+    bool haveSnapshot = cacheAvailable;
+    bool offline = cacheAvailable;
+    dashboard::ClientResult fetchResult = dashboard::ClientResult::WifiUnavailable;
+    if (cacheAvailable) Serial.println("[Dashboard] valid cached snapshot loaded");
+    if (wakeGesture == Gesture::NextPage && cacheAvailable) {
+        networkAllowed = false;
+        Serial.println("[Button] page switch uses cached snapshot; network refresh deferred");
+    }
+
+    WiFi.mode(networkAllowed ? WIFI_STA : WIFI_OFF);
+    wifiManager.setHostname("J-Calendar");
+    wifiManager.setEnableConfigPortal(false);
+    wifiManager.setConnectTimeout(WIFI_TIMEOUT_SECONDS);
+    const bool wifiConnected = networkAllowed && wifiManager.autoConnect();
+    Serial.printf("[WiFi] %s\n", wifiConnected ? "connected" : "unavailable");
+    if (networkAllowed && !wifiConnected) {
+        Serial.println("[WiFi] check saved credentials/network; hold or double-click the button after wake to configure");
+    }
+
+    if (wifiConnected) {
+        _sntp_exec();
+        Serial.printf("[SNTP] %s\n", waitForSntp() ? "synchronized" : "timeout/failed");
+        Serial.printf("[SNTP] system epoch=%lld\n", static_cast<long long>(time(nullptr)));
+
+        dashboard::Snapshot fresh;
+        String json;
+        dashboard::ClientResult result = dashboard::dashboard_fetch(fresh, json);
+        if (result == dashboard::ClientResult::NotConfigured) {
+            result = dashboard::local_dashboard_fetch(fresh, json);
+        }
+        fetchResult = result;
+        Serial.printf("[Dashboard] fetch=%s\n", dashboard::clientResultName(result));
+        if (result == dashboard::ClientResult::Ok) {
+            snapshot = fresh;
+            const String focus = configuredFocus();
+            if (!focus.isEmpty()) snapshot.focus.text = focus;
+            haveSnapshot = true;
+            offline = false;
+            if (!json.isEmpty() && !dashboard::dashboard_cache_store(json.c_str(), json.length())) {
+                Serial.println("[Dashboard] cache update failed; continuing with fresh snapshot");
+            }
+        }
+    }
+
+    if (!haveSnapshot && page == PAGE_DASHBOARD) {
+        // Render actionable state on first boot instead of leaving an unrelated
+        // calendar image visible when there is no cache or usable data source.
+        const bool notConfigured = fetchResult == dashboard::ClientResult::NotConfigured;
+        const dashboard::Status state = notConfigured ? dashboard::Status::NotConfigured : dashboard::Status::Error;
+        snapshot.weather.status = state;
+        snapshot.weather.locationName = "天气";
+        snapshot.weather.condition = notConfigured ? "未配置" : "数据获取失败";
+        snapshot.usageCount = 1;
+        snapshot.usage[0].provider = "deepseek";
+        snapshot.usage[0].balance.status = state;
+        for (uint8_t i = 0; i < snapshot.usageCount; ++i) snapshot.usage[i].status = state;
+        snapshot.focus.type = "connection_error";
+        snapshot.focus.text = notConfigured ? "双击按键配置天气与 DeepSeek" : "检查网络及数据源配置";
+        time_t now = time(nullptr);
+        if (now >= 1577836800) {
+            struct tm local = {};
+            localtime_r(&now, &local);
+            char date[11];
+            strftime(date, sizeof(date), "%Y-%m-%d", &local);
+            snapshot.localDate = date;
+        }
+        offline = false;
+    }
+
+    const String focus = configuredFocus();
+    if (!focus.isEmpty()) snapshot.focus.text = focus;
+    if (page == PAGE_DASHBOARD) {
+        const uint32_t hash = snapshotDisplayHash(snapshot, offline, page);
+        if (displayChanged(page, hash, forceRefresh)) {
+            si_dashboard(snapshot, offline);
+            if (waitForScreen()) {
+                recordSuccessfulRefresh();
+                storeDisplayHash(page, hash);
+            }
+        } else {
+            Serial.println("[Screen] dashboard content unchanged; full refresh skipped");
+        }
+    } else if (page == PAGE_CALENDAR) {
+        const uint32_t hash = calendarDisplayHash(snapshot, offline);
+        if (displayChanged(page, hash, forceRefresh)) {
+            si_screen(snapshot, offline);
+            if (waitForScreen()) {
+                recordSuccessfulRefresh();
+                storeDisplayHash(page, hash);
+            }
+        } else {
+            Serial.println("[Screen] calendar content unchanged; full refresh skipped");
+        }
+    } else {
+        Serial.println("[Dashboard] no usable fresh or cached snapshot; preserving current e-paper image");
+    }
+    enterDeepSleep();
+}
+
+} // namespace
+
+void setup() {
+    delay(10);
+    Serial.begin(115200);
+    setenv("TZ", "CST-8", 1);
+    tzset();
+    Serial.printf("\n=== J-Calendar %s ===\n", J_VERSION);
+    Serial.printf("[Wake] cause=%d\n", static_cast<int>(esp_sleep_get_wakeup_cause()));
+    migratePreferences();
+    led_init();
+    led_on();
+    delay(100);
+    led_off();
+}
+
+void loop() {
+    if (mainFlowComplete) {
+        delay(100);
+        return;
+    }
+    mainFlowComplete = true;
+    runMainFlow(detectWakeGesture());
+}

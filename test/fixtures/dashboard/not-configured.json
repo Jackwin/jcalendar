@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-18T01:00:00Z",
+  "timezone": "Asia/Shanghai",
+  "local_date": "2026-10-18",
+  "weather": {"status":"not_configured","source":"qweather","observed_at":null,"fetched_at":null,"location_name":"","temp_c":null,"temp_min_c":null,"temp_max_c":null,"condition":"","condition_code":""},
+  "usage": [
+    {"provider":"openai","status":"not_configured","source":"provider_api","coverage":"project","completeness":"unknown","window_start":"2026-10-17T16:00:00Z","window_end":"2026-10-18T01:00:00Z","fetched_at":null,"observed_at":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"balance":null},
+    {"provider":"deepseek","status":"unsupported","source":"gateway_ledger","coverage":"gateway_only","completeness":"unknown","window_start":"2026-10-17T16:00:00Z","window_end":"2026-10-18T01:00:00Z","fetched_at":null,"observed_at":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"balance":{"status":"not_configured","currency":"","amount":"","fetched_at":null}}
+  ],
+  "focus": {"type":"manual","text":""},
+  "refresh_after_seconds": 7200
+}

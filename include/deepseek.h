@@ -3,33 +3,41 @@
 
 #include <Arduino.h>
 
-// DeepSeek 数据
+enum DeepSeekDataStatus : int8_t {
+    DEEPSEEK_NOT_STARTED = -1,
+    DEEPSEEK_LOADING = 0,
+    DEEPSEEK_OK = 1,
+    DEEPSEEK_ERROR = 2,
+    DEEPSEEK_NOT_CONFIGURED = 3,
+    DEEPSEEK_UNSUPPORTED = 4,
+    DEEPSEEK_UNKNOWN = 5,
+};
+
+// DeepSeek balance is independent from token usage. The public provider API
+// currently used by this firmware exposes balance but no account-wide daily
+// token endpoint.
 struct DeepSeekData {
-    // 本次 deepseek-v4-flash 调用的 token 用量
-    uint32_t flashPromptTokens;
-    uint32_t flashCompletionTokens;
-    uint32_t flashTotalTokens;
-    // 本次 deepseek-v4-pro 调用的 token 用量
-    uint32_t proPromptTokens;
-    uint32_t proCompletionTokens;
-    uint32_t proTotalTokens;
-    String content; // 生成的文本（未在屏幕展示，预留）
-    // 账户余额（来自 GET /user/balance）
-    bool isAvailable;
+    DeepSeekDataStatus usageStatus = DEEPSEEK_UNSUPPORTED;
+    bool hasUsage = false;
+    uint64_t inputTokens = 0;
+    uint64_t outputTokens = 0;
+    uint64_t totalTokens = 0;
+    String usageSource;
+    String usageCoverage;
+
+    DeepSeekDataStatus balanceStatus = DEEPSEEK_NOT_STARTED;
+    bool isAvailable = false;
     String currency;       // CNY / USD
     String totalBalance;   // 总余额
     String grantedBalance; // 赠金余额
     String toppedUpBalance; // 充值余额
-    // 今日累计 token（跨日重置，NVS 持久化）
-    uint32_t tokensTodayFlash;  // flash 今日累计
-    uint32_t tokensTodayPro;    // pro 今日累计
 };
 
 // 状态：-1 未开始, 0 进行中, 1 成功(至少一项), 2 失败, 3 未配置Key
 int8_t deepseek_status();
 DeepSeekData* deepseek_data();
 void deepseek_exec(int status = 0);
-void deepseek_exec_balance_only(); // 仅查余额，不消耗 token（每小时调用）
+void deepseek_exec_balance_only(); // 仅查余额，不调用 chat/completions
 void deepseek_stop();
 
 #endif
